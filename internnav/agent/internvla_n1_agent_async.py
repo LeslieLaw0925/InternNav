@@ -2,15 +2,11 @@ import copy
 import itertools
 import os
 import re
-import sys
 import time
 from datetime import datetime
-from pathlib import Path
 
 import numpy as np
 import torch
-
-sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from collections import OrderedDict
 
@@ -19,6 +15,8 @@ from transformers import AutoProcessor
 import ray
 
 from internnav.agent.base import Agent
+from internnav.configs.agent import AgentCfg
+from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM, build_navdp
 from internnav.model.utils.vln_utils import split_and_clean, traj_to_actions
 
@@ -48,22 +46,26 @@ class SharedMemory:
 
     def get(self, key):
         """返回 ObjectRef(快模型可零拷贝获取)"""
-        return self.store.get(key, None)
+        object_ref_val =  self.store.get(key, None)
+        return object_ref_val
     
     def clear(self):
         self.store = {}
     
 
-@ray.remote
 @Agent.register('internvla_n1_arbiter')
-class VLNArbiterAgent:
+class VLNArbiterAgent(Agent):
     '''
     控制器，协调 S1 和 S2 agent 的工作
     '''
-    def __init__(self, config):
+    def __init__(self, config: AgentCfg):
+        super().__init__(config)
+        vln_sensor_config = self.config.model_settings
+        _model_settings = ModelCfg(**vln_sensor_config)
+
         self.shm = SharedMemory.remote()
-        self.s1_agent = S1Agent.remote(self.shm, config)
-        self.s2_agent = S2Agent.remote(self.shm, config)
+        self.s1_agent = S1Agent.remote(self.shm, _model_settings)
+        self.s2_agent = S2Agent.remote(self.shm, _model_settings)
         self.action_seq: list = []
         self.last_action: int = -1
         self.look_down: bool = False
@@ -73,7 +75,7 @@ class VLNArbiterAgent:
         ray.kill(self.s2_agent)
         ray.kill(self.shm)
 
-    def step(self, obs): 
+    def step(self, obs):
         obs = obs[0]  # do not support batch_env currently?
         rgb = obs['rgb']
         depth = obs['depth']
@@ -83,8 +85,9 @@ class VLNArbiterAgent:
         if self.last_action == 5:
             self.look_down = True
             # 按照internnav的逻辑，此时self.action_seq为None，输出latent_traj
-            self.action_seq = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
+            action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
                                       self.look_down)
+            self.action_seq = ray.get(action_seq_ref)
             self.look_down = False
 
         if self.action_seq is not None:
@@ -98,7 +101,8 @@ class VLNArbiterAgent:
             self.action_seq = ray.get(action_seq_ref)
             
         self.last_action = self.action_seq.pop(0)
-        return [self.last_action]
+        output = {'action': [self.last_action]}
+        return [{'action': output['action'], 'ideal_flag': True}]
 
     def reset(self):
         self.s1_agent.reset.remote()
@@ -108,40 +112,49 @@ class VLNArbiterAgent:
         self.last_action = -1
         self.look_down = False
 
+        self.s2_agent.reset.remote()
+        self.s1_agent.reset.remote()
 
-@ray.remote
+
+@ray.remote(num_gpus=0.2)
 class S1Agent:
-    def __init__(self, shm, args):
-        self.device = torch.device(args.device)
-        self.model = build_navdp(args)
-        self.model.eval()
-        self.model.to(self.device)
+    def __init__(self, shm, model_settings: ModelCfg):
         self.shm = shm
+        self.device = torch.device(model_settings.device)
+        self.model = build_navdp(model_settings)
+        self.model.eval()
+        self.model.to(dtype=torch.bfloat16, device=self.device)
+        self.depth_threshold = 5.0
 
     def step(self, rgb: np.ndarray, depth: np.ndarray):
-        pixel_goal_rgb = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_RGB))
-        pixel_goal_depth = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_DEPTH))
-        traj_latents = ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT))
+        pixel_goal_rgb = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_RGB)))
+        pixel_goal_depth = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_DEPTH)))
+        traj_latents = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT)))
 
         if not all([pixel_goal_rgb is not None, pixel_goal_depth is not None, traj_latents is not None]):
             return None
-
-        processed_pixel_rgb = np.array(Image.fromarray(pixel_goal_rgb).resize((224, 224))) / 255
-        processed_pixel_depth = np.array(Image.fromarray(pixel_goal_depth).resize((224, 224)))
-        processed_rgb = np.array(Image.fromarray(rgb).resize((224, 224))) / 255
-        processed_depth = np.array(Image.fromarray(depth).resize((224, 224)))
+        
+        processed_pixel_rgb = (np.array(Image.fromarray(pixel_goal_rgb).resize((224, 224))) / 255.0)
+        processed_pixel_depth = (np.array(Image.fromarray(pixel_goal_depth[:, :, 0]).resize((224, 224))) * 10.0)
+        processed_pixel_depth[processed_pixel_depth > self.depth_threshold] = self.depth_threshold
+        
+        processed_rgb = np.array(Image.fromarray(rgb).resize((224, 224))) / 255.0
+        processed_depth = (np.array(Image.fromarray(depth[:, :, 0]).resize((224, 224))) * 10.0)  # should be 0-10m
+        processed_depth[processed_depth > self.depth_threshold] = self.depth_threshold
+        
         rgbs = (
             torch.stack([torch.from_numpy(processed_pixel_rgb), torch.from_numpy(processed_rgb)])
             .unsqueeze(0)
             .to(self.device)
-        )
+        )  # [1, 2, 224, 224, 3]
         depths = (
             torch.stack([torch.from_numpy(processed_pixel_depth), torch.from_numpy(processed_depth)])
             .unsqueeze(0)
             .unsqueeze(-1)
             .to(self.device)
-        )
-        trajectories = self.step_s1(traj_latents, rgbs, depths)
+        )  # [1, 2, 224, 224, 1]
+
+        trajectories = self.step_s1(traj_latents, rgbs, depths, use_async=True)
         output_trajectory = traj_to_actions(trajectories)[:4]
         return output_trajectory
 
@@ -160,15 +173,16 @@ class S1Agent:
         pass
 
 
-@ray.remote
+@ray.remote(num_gpus=0.8)
 class S2Agent:
-    def __init__(self, shm, args):
-        self.device = torch.device(args.device)
+    def __init__(self, shm, model_settings: ModelCfg):
         self.shm = shm
-        self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        print(f"args.model_path{args.model_path}")
+        self.device = torch.device(model_settings.device)
+        # project_root = os.environ.get('PROJECT_ROOT', '.')
+        # self.save_dir = f"{project_root}/test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        print(f"args.model_path{model_settings.model_path}")
         self.model = InternVLAN1ForCausalLM.from_pretrained(
-            args.model_path,
+            model_settings.model_path,
             torch_dtype=torch.bfloat16,
             attn_implementation="flash_attention_2",
             device_map={"": self.device},
@@ -176,15 +190,15 @@ class S2Agent:
         self.model.eval()
         self.model.to(self.device)
 
-        self.processor = AutoProcessor.from_pretrained(args.model_path)
+        self.processor = AutoProcessor.from_pretrained(model_settings.model_path)
         self.processor.tokenizer.padding_side = 'left'
 
-        self.resize_w = args.resize_w
-        self.resize_h = args.resize_h
-        self.num_history = args.num_history
-        self.PLAN_STEP_GAP = args.plan_step_gap
+        self.resize_w = model_settings.resize_w
+        self.resize_h = model_settings.resize_h
+        self.num_history = model_settings.num_history
+        # self.PLAN_STEP_GAP = model_settings.plan_step_gap
         self.intrinsic = self.get_intrinsic_matrix(
-            args.width, args.height, args.hfov
+            model_settings.width, model_settings.height, model_settings.hfov
         )
 
         prompt = "You are an autonomous navigation assistant. Your task is to <instruction>. Where should you go next to stay on track? Please output the next waypoint's coordinates in the image. Please output STOP when you have successfully completed the task."
@@ -255,8 +269,8 @@ class S2Agent:
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
 
-        self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.makedirs(self.save_dir, exist_ok=True)
+        # self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
+        # os.makedirs(self.save_dir, exist_ok=True)
 
     def parse_actions(self, output):
         action_patterns = '|'.join(re.escape(action) for action in self.actions2idx)
@@ -270,7 +284,7 @@ class S2Agent:
         image = Image.fromarray(rgb).convert('RGB')
         image = image.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(image)
-        image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
+        # image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
         self.episode_idx += 1
 
     def trajectory_tovw(self, trajectory, kp=1.0):
@@ -290,6 +304,7 @@ class S2Agent:
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL, copy.deepcopy(self.output_pixel))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_RGB, copy.deepcopy(rgb))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_DEPTH, copy.deepcopy(depth))
+            self.output_latent = self.output_latent.cpu()
             self.shm.put.remote(SharedObjKeys.TRAJ_LATENT, copy.deepcopy(self.output_latent))
             self.shm.put.remote(SharedObjKeys.STATE, S1_INFER)
             return None
@@ -299,10 +314,7 @@ class S2Agent:
         if not look_down:
             image = image.resize((self.resize_w, self.resize_h))
             self.rgb_list.append(image)
-            # image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
-        # else:
-        #     image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}_look_down.jpg")
-        # if not look_down:
+
             self.conversation_history = []
             self.past_key_values = None
 
@@ -364,8 +376,7 @@ class S2Agent:
         self.llm_output = self.processor.tokenizer.decode(
             output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
         )
-        with open(f"{self.save_dir}/llm_output_{self.episode_idx: 04d}.txt", 'w') as f:
-            f.write(self.llm_output)
+       
         self.last_output_ids = copy.deepcopy(output_ids[0])
         self.past_key_values = copy.deepcopy(outputs.past_key_values)
         print(f"output {self.episode_idx}  {self.llm_output} cost: {t1 - t0}s")

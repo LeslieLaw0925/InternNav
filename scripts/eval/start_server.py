@@ -11,7 +11,8 @@ import sys
 
 # Import for agent registry side effects — do not remove
 from internnav.agent import Agent  # noqa: F401
-from internnav.utils import AgentServer
+# from internnav.utils import AgentServer
+from internnav.utils.comm_utils.server import AgentServer
 
 
 def load_eval_cfg(config_path, attr_name='eval_cfg'):

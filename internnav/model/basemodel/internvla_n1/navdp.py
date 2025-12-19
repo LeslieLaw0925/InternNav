@@ -1,3 +1,10 @@
+import sys
+import os
+
+project_root = os.environ.get('PROJECT_ROOT', '.')
+sys.path.append(project_root)
+sys.path.append(f'{project_root}/src/diffusion-policy')
+
 import torch
 import torch.nn as nn
 import numpy as np

@@ -3,11 +3,13 @@ from internnav.agent.cma_agent import CmaAgent
 from internnav.agent.rdp_agent import RdpAgent
 from internnav.agent.seq2seq_agent import Seq2SeqAgent
 from internnav.agent.internvla_n1_agent import InternVLAN1Agent
+from internnav.agent.internvla_n1_agent_async import VLNArbiterAgent
 
 __all__ = [
     'Agent',
     'CmaAgent',
     'RdpAgent',
     'Seq2SeqAgent',
-    'InternVLAN1Agent'
+    'InternVLAN1Agent',
+    'VLNArbiterAgent'
 ]
