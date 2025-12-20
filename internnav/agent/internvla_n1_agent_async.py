@@ -5,6 +5,8 @@ import re
 import time
 from datetime import datetime
 
+import cv2
+import imageio
 import numpy as np
 import torch
 
@@ -19,6 +21,7 @@ from internnav.configs.agent import AgentCfg
 from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM, build_navdp
 from internnav.model.utils.vln_utils import split_and_clean, traj_to_actions
+from internnav.model.utils.misc import set_random_seed
 
 
 DEFAULT_IMAGE_TOKEN = "<image>"
@@ -37,17 +40,21 @@ class SharedObjKeys:
 @ray.remote
 class SharedMemory:
     def __init__(self):
-        self.store = {}     # {key: ObjectRef}
+        self.store = {} 
 
     def put(self, key, data):
         """写入共享内存（零拷贝）"""
-        ref = ray.put(data)    # Ray Object Store
-        self.store[key] = ref
+        # ref = ray.put(data)    # Ray Object Store
+        self.store[key] = data
 
     def get(self, key):
         """返回 ObjectRef(快模型可零拷贝获取)"""
-        object_ref_val =  self.store.get(key, None)
-        return object_ref_val
+        return self.store.get(key, None)
+    
+    def get_blocking(self, key):
+        while key not in self.store or self.store[key] is None:
+            time.sleep(0.001)
+        return self.store[key]
     
     def clear(self):
         self.store = {}
@@ -55,9 +62,6 @@ class SharedMemory:
 
 @Agent.register('internvla_n1_arbiter')
 class VLNArbiterAgent(Agent):
-    '''
-    控制器，协调 S1 和 S2 agent 的工作
-    '''
     def __init__(self, config: AgentCfg):
         super().__init__(config)
         vln_sensor_config = self.config.model_settings
@@ -69,6 +73,15 @@ class VLNArbiterAgent(Agent):
         self.action_seq: list = []
         self.last_action: int = -1
         self.look_down: bool = False
+        self.episode_idx: int = 0
+
+        # vis debug
+        self.vis_debug = vln_sensor_config['vis_debug']
+        if self.vis_debug:
+            self.debug_path = vln_sensor_config['vis_debug_path']
+            os.makedirs(self.debug_path, exist_ok=True)
+            self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async.mp4", fps=5)
+            self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async_dp.mp4", fps=5)
 
     def __del__(self):
         ray.kill(self.s1_agent)
@@ -99,9 +112,18 @@ class VLNArbiterAgent(Agent):
         else:
             action_seq_ref = self.s1_agent.step.remote(rgb, depth)
             self.action_seq = ray.get(action_seq_ref)
+            if self.action_seq == []:
+                self.action_seq = [-1]
             
         self.last_action = self.action_seq.pop(0)
         output = {'action': [self.last_action]}
+
+        # Visualization
+        if self.vis_debug:
+            vis = rgb.copy()
+            if 'action' in output:
+                vis = cv2.putText(vis, str(output['action'][0]), (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            self.fps_writer.append_data(vis)
         return [{'action': output['action'], 'ideal_flag': True}]
 
     def reset(self):
@@ -111,14 +133,22 @@ class VLNArbiterAgent(Agent):
         self.action_seq = []
         self.last_action = -1
         self.look_down = False
+        self.episode_idx += 1
 
         self.s2_agent.reset.remote()
         self.s1_agent.reset.remote()
+
+        if self.vis_debug:
+            self.fps_writer.close()
+            self.fps_writer2.close()
+            self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async.mp4", fps=5)
+            self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async_dp.mp4", fps=5)
 
 
 @ray.remote(num_gpus=0.2)
 class S1Agent:
     def __init__(self, shm, model_settings: ModelCfg):
+        set_random_seed(0)
         self.shm = shm
         self.device = torch.device(model_settings.device)
         self.model = build_navdp(model_settings)
@@ -127,9 +157,9 @@ class S1Agent:
         self.depth_threshold = 5.0
 
     def step(self, rgb: np.ndarray, depth: np.ndarray):
-        pixel_goal_rgb = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_RGB)))
-        pixel_goal_depth = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_DEPTH)))
-        traj_latents = ray.get(ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT)))
+        traj_latents = ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT))
+        pixel_goal_rgb = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_RGB))
+        pixel_goal_depth = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_DEPTH))
 
         if not all([pixel_goal_rgb is not None, pixel_goal_depth is not None, traj_latents is not None]):
             return None
@@ -154,9 +184,10 @@ class S1Agent:
             .to(self.device)
         )  # [1, 2, 224, 224, 1]
 
-        trajectories = self.step_s1(traj_latents, rgbs, depths, use_async=True)
-        output_trajectory = traj_to_actions(trajectories)[:4]
-        return output_trajectory
+        dp_actions = self.step_s1(traj_latents, rgbs, depths, use_async=True)
+        action_list = traj_to_actions(dp_actions)
+        action_list = [x for x in action_list if x != 0]
+        return action_list[:4]
 
     def step_s1(self, traj_latents, images_dp=None, depths_dp=None, use_async=False):
         if use_async:
@@ -176,10 +207,9 @@ class S1Agent:
 @ray.remote(num_gpus=0.8)
 class S2Agent:
     def __init__(self, shm, model_settings: ModelCfg):
+        set_random_seed(0)
         self.shm = shm
         self.device = torch.device(model_settings.device)
-        # project_root = os.environ.get('PROJECT_ROOT', '.')
-        # self.save_dir = f"{project_root}/test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
         print(f"args.model_path{model_settings.model_path}")
         self.model = InternVLAN1ForCausalLM.from_pretrained(
             model_settings.model_path,
@@ -304,9 +334,9 @@ class S2Agent:
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL, copy.deepcopy(self.output_pixel))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_RGB, copy.deepcopy(rgb))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_DEPTH, copy.deepcopy(depth))
-            self.output_latent = self.output_latent.cpu()
-            self.shm.put.remote(SharedObjKeys.TRAJ_LATENT, copy.deepcopy(self.output_latent))
-            self.shm.put.remote(SharedObjKeys.STATE, S1_INFER)
+            self.output_latent = self.output_latent.detach().cpu()
+            self.shm.put.remote(SharedObjKeys.TRAJ_LATENT, self.output_latent)
+            print(f"S2 put latent traj to shm.")
             return None
 
     def step_s2(self, rgb, depth, pose, instruction, intrinsic, look_down=False):

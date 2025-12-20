@@ -16,8 +16,8 @@ eval_cfg = EvalCfg(
         model_settings={
             'env_num': 1,
             'sim_num': 1,
-            'model_path': "/home/luosiqi/projects/InternNav/checkpoints/InternVLA-N1-wo-dagger",
-            'navdp_pretrained': "/home/luosiqi/projects/InternNav/checkpoints/navdp-cross-modal.ckpt",
+            'model_path': "checkpoints/InternVLA-N1-wo-dagger",
+            'navdp_pretrained': "checkpoints/navdp-cross-modal.ckpt",
             'navdp_version': 0.1,
             'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],
             'width': 640,
@@ -51,7 +51,7 @@ eval_cfg = EvalCfg(
             'env_num': 1,
             'use_distributed': False,  # If the others setting in task_settings, please set use_distributed = False.
             'proc_num': 1,
-            'max_step': 1000,  # If use flash mode，default 1000; descrete mode, set 50000
+            'max_step': 100000,  # If use flash mode，default 1000; descrete mode, set 50000
         },
         scene=SceneCfg(
             scene_type='mp3d',
