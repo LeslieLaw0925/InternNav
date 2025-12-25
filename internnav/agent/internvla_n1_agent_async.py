@@ -75,6 +75,13 @@ class VLNArbiterAgent(Agent):
         self.look_down: bool = False
         self.episode_idx: int = 0
 
+        self.s2_step_idx = 0
+        self.last_s2_step_idx = 0
+        self.PLAN_STEP_GAP = 8
+
+        self.init_flag = True
+        self.output_pixel = None
+
         # vis debug
         self.vis_debug = vln_sensor_config['vis_debug']
         if self.vis_debug:
@@ -103,17 +110,16 @@ class VLNArbiterAgent(Agent):
             self.action_seq = ray.get(action_seq_ref)
             self.look_down = False
 
-        if self.action_seq is not None:
-            if len(self.action_seq) > 0:
-                self.s2_agent.step_no_infer.remote(rgb, depth, pose)
-            else:
-                action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, self.look_down)
-                self.action_seq = ray.get(action_seq_ref)
-        else:
+        if self.action_seq == []:
+            action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
+                                      self.look_down)
+            self.action_seq = ray.get(action_seq_ref)
+        elif self.action_seq is None:
             action_seq_ref = self.s1_agent.step.remote(rgb, depth)
             self.action_seq = ray.get(action_seq_ref)
-            if self.action_seq == []:
-                self.action_seq = [-1]
+            self.output_pixel = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL))
+        else:
+            self.s2_agent.step_no_infer.remote(rgb, depth, pose)
             
         self.last_action = self.action_seq.pop(0)
         output = {'action': [self.last_action]}
@@ -123,7 +129,23 @@ class VLNArbiterAgent(Agent):
             vis = rgb.copy()
             if 'action' in output:
                 vis = cv2.putText(vis, str(output['action'][0]), (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            if self.output_pixel is not None:
+                pixel = self.output_pixel
+                vis = cv2.putText(
+                    vis,
+                    f"{pixel[1]}, {pixel[0]}",
+                    (50, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    2,
+                )
+
+                cv2.circle(vis, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
+                self.output_pixel = None
+
             self.fps_writer.append_data(vis)
+
         return [{'action': output['action'], 'ideal_flag': True}]
 
     def reset(self):
@@ -186,6 +208,7 @@ class S1Agent:
 
         dp_actions = self.step_s1(traj_latents, rgbs, depths, use_async=True)
         action_list = traj_to_actions(dp_actions)
+        import ipdb; ipdb.set_trace()
         action_list = [x for x in action_list if x != 0]
         return action_list[:4]
 
@@ -226,7 +249,6 @@ class S2Agent:
         self.resize_w = model_settings.resize_w
         self.resize_h = model_settings.resize_h
         self.num_history = model_settings.num_history
-        # self.PLAN_STEP_GAP = model_settings.plan_step_gap
         self.intrinsic = self.get_intrinsic_matrix(
             model_settings.width, model_settings.height, model_settings.hfov
         )
@@ -314,7 +336,6 @@ class S2Agent:
         image = Image.fromarray(rgb).convert('RGB')
         image = image.resize((self.resize_w, self.resize_h))
         self.rgb_list.append(image)
-        # image.save(f"{self.save_dir}/debug_raw_{self.episode_idx: 04d}.jpg")
         self.episode_idx += 1
 
     def trajectory_tovw(self, trajectory, kp=1.0):
@@ -328,16 +349,16 @@ class S2Agent:
         self.output_action, self.output_latent, self.output_pixel = self.step_s2(
             rgb, depth, pose, instruction, self.intrinsic, look_down
         )
-        if self.output_action is not None:
-            return self.output_action
-        elif self.output_latent is not None:
+
+        if self.output_latent is not None:
+            self.output_latent = self.output_latent.detach().cpu()
+            self.shm.put.remote(SharedObjKeys.TRAJ_LATENT, self.output_latent)
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL, copy.deepcopy(self.output_pixel))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_RGB, copy.deepcopy(rgb))
             self.shm.put.remote(SharedObjKeys.PIXEL_GOAL_DEPTH, copy.deepcopy(depth))
-            self.output_latent = self.output_latent.detach().cpu()
-            self.shm.put.remote(SharedObjKeys.TRAJ_LATENT, self.output_latent)
             print(f"S2 put latent traj to shm.")
-            return None
+
+        return self.output_action
 
     def step_s2(self, rgb, depth, pose, instruction, intrinsic, look_down=False):
         image = Image.fromarray(rgb).convert('RGB')

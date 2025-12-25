@@ -37,6 +37,13 @@ class InternVLAN1AsyncAgent:
         self.model.eval()
         self.model.to(self.device)
 
+        # navdp_state_dict = {}
+        # for name, param in self.model.state_dict().items():
+        #     if "model.navdp" in name or name.strip() == "lm_head.weight":
+        #         name = name.replace("model.navdp.", "")
+        #         navdp_state_dict[name] = param
+        # torch.save(navdp_state_dict, "checkpoints/navdp-cotraining-model-new.ckpt")
+
         self.processor = AutoProcessor.from_pretrained(args.model_path)
         self.processor.tokenizer.padding_side = 'left'
 

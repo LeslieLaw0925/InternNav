@@ -134,7 +134,7 @@ def annotate_image(idx, image, llm_output, trajectory, pixel_goal, output_dir):
 class Args:
     def __init__(self):
         self.device = "cuda:0"
-        self.model_path = "checkpoints/InternVLA-N1"
+        self.model_path = "checkpoints/InternVLA-N1-wo-dagger"
         self.resize_w = 384
         self.resize_h = 384
         self.num_history = 8
