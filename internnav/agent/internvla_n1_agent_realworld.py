@@ -42,7 +42,7 @@ class InternVLAN1AsyncAgent:
         #     if "model.navdp" in name or name.strip() == "lm_head.weight":
         #         name = name.replace("model.navdp.", "")
         #         navdp_state_dict[name] = param
-        # torch.save(navdp_state_dict, "checkpoints/navdp-cotraining-model-new.ckpt")
+        # torch.save(navdp_state_dict, "checkpoints/navdp-cotraining-model.ckpt")
 
         self.processor = AutoProcessor.from_pretrained(args.model_path)
         self.processor.tokenizer.padding_side = 'left'
@@ -205,6 +205,7 @@ class InternVLAN1AsyncAgent:
                 {'role': 'assistant', 'content': [{'type': 'text', 'text': self.llm_output}]}
             )
 
+        import pdb; pdb.set_trace()
         prompt = self.conjunctions[0] + DEFAULT_IMAGE_TOKEN
         sources[0]["value"] += f" {prompt}."
         prompt_instruction = copy.deepcopy(sources[0]["value"])
@@ -220,6 +221,7 @@ class InternVLAN1AsyncAgent:
 
         self.conversation_history.append({'role': 'user', 'content': content})
 
+        pdb.set_trace()
         text = self.processor.apply_chat_template(self.conversation_history, tokenize=False, add_generation_prompt=True)
 
         inputs = self.processor(text=[text], images=self.input_images, return_tensors="pt").to(self.device)

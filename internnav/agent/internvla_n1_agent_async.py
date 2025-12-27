@@ -25,8 +25,6 @@ from internnav.model.utils.misc import set_random_seed
 
 
 DEFAULT_IMAGE_TOKEN = "<image>"
-S1_INFER = "execution"
-S2_INFER = "planning"
 
 
 class SharedObjKeys:
@@ -43,18 +41,10 @@ class SharedMemory:
         self.store = {} 
 
     def put(self, key, data):
-        """写入共享内存（零拷贝）"""
-        # ref = ray.put(data)    # Ray Object Store
         self.store[key] = data
 
     def get(self, key):
-        """返回 ObjectRef(快模型可零拷贝获取)"""
         return self.store.get(key, None)
-    
-    def get_blocking(self, key):
-        while key not in self.store or self.store[key] is None:
-            time.sleep(0.001)
-        return self.store[key]
     
     def clear(self):
         self.store = {}
@@ -75,12 +65,11 @@ class VLNArbiterAgent(Agent):
         self.look_down: bool = False
         self.episode_idx: int = 0
 
-        self.s2_step_idx = 0
-        self.last_s2_step_idx = 0
-        self.PLAN_STEP_GAP = 8
+        self.forward_step_num = 0
+        self.PLAN_STEP_GAP = getattr(_model_settings, 'plan_step_gap', 8)
 
-        self.init_flag = True
         self.output_pixel = None
+        self.which_is_inferring = "s2"
 
         # vis debug
         self.vis_debug = vln_sensor_config['vis_debug']
@@ -95,6 +84,21 @@ class VLNArbiterAgent(Agent):
         ray.kill(self.s2_agent)
         ray.kill(self.shm)
 
+    def s2_step(self, rgb, depth, pose, instruction, look_down=False):
+        action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
+                                        look_down)
+        action_seq = ray.get(action_seq_ref)
+        self.forward_step_num = 0
+        self.which_is_inferring = "s2"
+        return action_seq
+    
+    def s1_step(self, rgb, depth):
+        action_seq_ref = self.s1_agent.step.remote(rgb, depth)
+        action_seq = ray.get(action_seq_ref)
+        self.which_is_inferring = "s1"
+        self.forward_step_num += len(action_seq)
+        return action_seq
+
     def step(self, obs):
         obs = obs[0]  # do not support batch_env currently?
         rgb = obs['rgb']
@@ -103,24 +107,23 @@ class VLNArbiterAgent(Agent):
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
         
         if self.last_action == 5:
-            self.look_down = True
-            # 按照internnav的逻辑，此时self.action_seq为None，输出latent_traj
-            action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
-                                      self.look_down)
-            self.action_seq = ray.get(action_seq_ref)
-            self.look_down = False
+            # 此时代表S2找到了pixel goal，获取pixel goal的rgb和depth和traj_latent
+            self.s2_step(rgb, depth, pose, instruction, look_down=True)
+            self.output_pixel = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL))
+            # 启动S1进行轨迹输出
+            self.action_seq = self.s1_step(rgb, depth)
 
         if self.action_seq == []:
-            action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
-                                      self.look_down)
-            self.action_seq = ray.get(action_seq_ref)
-        elif self.action_seq is None:
-            action_seq_ref = self.s1_agent.step.remote(rgb, depth)
-            self.action_seq = ray.get(action_seq_ref)
-            self.output_pixel = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL))
+            if self.which_is_inferring == "s1":
+                if self.forward_step_num > self.PLAN_STEP_GAP:
+                    self.action_seq = self.s2_step(rgb, depth, pose, instruction, look_down=False)
+                else:
+                    self.action_seq = self.s1_step(rgb, depth)
+            else:
+                self.action_seq = self.s2_step(rgb, depth, pose, instruction, look_down=False)
         else:
             self.s2_agent.step_no_infer.remote(rgb, depth, pose)
-            
+        
         self.last_action = self.action_seq.pop(0)
         output = {'action': [self.last_action]}
 
@@ -207,10 +210,13 @@ class S1Agent:
         )  # [1, 2, 224, 224, 1]
 
         dp_actions = self.step_s1(traj_latents, rgbs, depths, use_async=True)
-        action_list = traj_to_actions(dp_actions)
-        import ipdb; ipdb.set_trace()
+        action_list = traj_to_actions(dp_actions, use_discrate_action=True)
         action_list = [x for x in action_list if x != 0]
-        return action_list[:4]
+
+        if action_list == []:
+            return [-1]
+        else:
+            return action_list[:4]
 
     def step_s1(self, traj_latents, images_dp=None, depths_dp=None, use_async=False):
         if use_async:
@@ -320,9 +326,6 @@ class S2Agent:
         self.output_pixel = None
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
-
-        # self.save_dir = "test_data/" + datetime.now().strftime("%Y%m%d_%H%M%S")
-        # os.makedirs(self.save_dir, exist_ok=True)
 
     def parse_actions(self, output):
         action_patterns = '|'.join(re.escape(action) for action in self.actions2idx)

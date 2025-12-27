@@ -127,7 +127,7 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
                 pretrained_dict = pretrained_dict['state_dict']
             
             model_dict = self.state_dict()
-           
+            
             matched_dict = {k: v for k, v in pretrained_dict.items() 
                         if k in model_dict and v.size() == model_dict[k].size()}
             
