@@ -26,7 +26,7 @@ if __name__ == '__main__':
     print("Starting Agent Server...")
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--host', type=str, default='localhost')
+    parser.add_argument('--host', type=str, default='0.0.0.0')
     parser.add_argument(
         '--config',
         type=str,

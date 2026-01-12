@@ -312,6 +312,8 @@ def get_config(evaluator_cfg: EvalCfg):
         model_settings = seq2seq_cfg.model_dump()
     elif evaluator_cfg.agent.model_name == 'internvla_n1':
         model_settings = internvla_n1_cfg.model_dump()
+    elif evaluator_cfg.agent.model_name == 'internvla_n1_arbiter':
+        model_settings = internvla_n1_cfg.model_dump()
 
     model_settings.update(evaluator_cfg.agent.model_settings)
     evaluator_cfg.agent.model_settings = model_settings
