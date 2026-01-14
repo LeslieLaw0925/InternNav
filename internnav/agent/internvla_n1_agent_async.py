@@ -2,19 +2,16 @@ import copy
 import itertools
 import os
 import re
-import time
-from datetime import datetime
-import sys
-sys.path.append('.')
-sys.path.append('./src/diffusion-policy')
+from collections import OrderedDict
+import json
+# import sys
+# sys.path.append('.')
+# sys.path.append('./src/diffusion-policy')
 
 import cv2
 import imageio
 import numpy as np
 import torch
-
-from collections import OrderedDict
-
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
 import ray
@@ -26,17 +23,14 @@ from internnav.agent.base import Agent
 from internnav.configs.agent import AgentCfg
 from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM
+from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
 from internnav.model.utils.vln_utils import split_and_clean, traj_to_actions
 from internnav.model.utils.misc import set_random_seed
-from internnav.model.basemodel.internvla_n1.internvla_n1_arch import build_traj_dit, \
-    build_depthanythingv2, LatentEmbSize, SinusoidalPositionalEncoding, MemoryEncoder, \
-    QFormer
 
 
 DEFAULT_IMAGE_TOKEN = "<image>"
-_RESNET_MEAN = [0.485, 0.456, 0.406]
-_RESNET_STD = [0.229, 0.224, 0.225]
 TROCH_DTYPE = torch.bfloat16
+
 
 class SharedObjKeys:
     PIXEL_GOAL = "goal"
@@ -193,51 +187,12 @@ class S1Agent:
         set_random_seed(0)
         self.shm = shm
         self.device = torch.device(model_settings.device)
-        model_path = model_settings.model_path.lower()
-
-        self.latent_queries = nn.Parameter(torch.randn(1, 4, 3584))
-
-        if 'navdp' in model_path:
-            # Use navdp as s1 model
-            self.type = 'navdp'
-            self.build_navdp(model_settings.navdp_pretrained)
-        elif 'dualvln' in model_path:
-            # Use nextdit as s1 model
-            self.type = 'nextdit'
-            self.build_nextdit()
-        else:
-            assert False, "Unknown S1 model type."
+        self.dtype = TROCH_DTYPE
+        self.config = json.load(open(os.path.join(model_settings.model_path, 'config.json'), 'r'))
+        self.config['navdp_pretrained'] = model_settings.navdp_pretrained
+        self.model = AsyncInternVLAN1MetaModel(self.config).to(self.device, self.dtype)
 
         self.depth_threshold = 5.0
-
-    def build_navdp(self, navdp_pretrained=None):
-        from internnav.model.basemodel.internvla_n1.navdp import NavDP_Policy_DPT_CriticSum_DAT
-        navdp = NavDP_Policy_DPT_CriticSum_DAT(navdp_pretrained=navdp_pretrained,
-                                            memory_size=2, 
-                                            navdp_version=0.1)
-        navdp.load_model()    
-        self.model = navdp
-        self.model.to(dtype=torch.bfloat16, device=self.device)
-        self.model.eval()
-    
-    def build_nextdit(self):
-        self.traj_dit, self.noise_scheduler = build_traj_dit(None)
-        self.traj_dit = self.traj_dit.to(self.device, dtype=TROCH_DTYPE)
-        self.action_encoder = nn.Linear(3, 384, bias=True).to(self.device, dtype=TROCH_DTYPE)
-        self.pos_encoding = SinusoidalPositionalEncoding(384).to(self.device, dtype=TROCH_DTYPE)
-        self.action_decoder = nn.Linear(384, 3, bias=True).to(self.device, dtype=TROCH_DTYPE)
-        self.cond_projector = nn.Sequential(
-            nn.Linear(3584, LatentEmbSize), nn.GELU(approximate="tanh"), nn.Linear(LatentEmbSize, LatentEmbSize)
-        ).to(self.device, dtype=TROCH_DTYPE)
-
-        self.rgb_model = build_depthanythingv2(None).to(self.device, dtype=TROCH_DTYPE)
-        self.memory_encoder = MemoryEncoder().to(self.device, dtype=TROCH_DTYPE)
-        self.rgb_resampler = QFormer().to(self.device, dtype=TROCH_DTYPE)
-
-        for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
-            self.rgb_model.register_buffer(name, 
-                                           torch.BFloat16Tensor(value).view(1, 1, 3, 1, 1).to(self.device), 
-                                           persistent=False)
 
     def step(self, rgb: np.ndarray, depth: np.ndarray = None):
         traj_latents = ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT))
@@ -270,18 +225,10 @@ class S1Agent:
         else:
             depths = None
 
-        if self.type == 'nextdit':
-            dp_actions = self.step_s1_nextdit(traj_latents.to(self.device), 
-                                              images_dp=rgbs, 
-                                              use_async=True)
-        elif self.type == 'navdp':
-            dp_actions = self.step_s1_navdp(traj_latents.to(self.device), 
-                                            images_dp=rgbs, 
-                                            depths_dp=depths, 
-                                            use_async=True)
-        else:
-            assert False, "Unknown S1 model type."
-        
+        dp_actions = self.step_s1(traj_latents.to(self.device),
+                                rgbs, 
+                                depths_dp=depths)
+            
         action_list = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]
 
@@ -289,96 +236,98 @@ class S1Agent:
             return [-1]
         else:
             return action_list[:4]
+        
+    def step_s1(
+        self,
+        traj_latents,
+        images_dp,
+        depths_dp=None,
+        predict_step_nums=32,
+        guidance_scale: float = 1.0,
+        num_inference_steps: int = 10,
+        num_sample_trajs: int = 32,
+    ):
+        if 'nextdit' in self.config['system1']:
+            scheduler = FlowMatchEulerDiscreteScheduler()
+            device = traj_latents.device
+            dtype = traj_latents.dtype
 
-    def step_s1_nextdit(self, traj_latents, 
-                        images_dp=None, 
-                        use_async=False,
-                        predict_step_nums=32,
-                        guidance_scale: float = 1.0,
-                        num_inference_steps: int = 10,
-                        num_sample_trajs: int = 32,
-                        ):
-        scheduler = FlowMatchEulerDiscreteScheduler()
-        device = traj_latents.device
-        dtype = traj_latents.dtype
+            traj_latents = self.model.cond_projector(traj_latents)
+            if 'async' in self.config['system1']:
+                with torch.no_grad():
+                    images_dp = images_dp.permute(0, 1, 4, 2, 3)
+                    images_dp_norm = (images_dp - self.model._resnet_mean) / self.model._resnet_std
+                    images_dp_feat = (
+                        self.model.rgb_model.get_intermediate_layers(images_dp_norm.flatten(0, 1).to(dtype))[0]
+                        .unflatten(dim=0, sizes=(1, -1))
+                    )
+                    memory_feat = self.model.memory_encoder(
+                        images_dp_feat.flatten(1, 2)
+                    )  # [bs*select_size,512,384]
+                    memory_feat = torch.cat([images_dp_feat.flatten(1, 2), memory_feat], dim=-1)
+                    memory_tokens = self.model.rgb_resampler(memory_feat)
+                hidden_states = torch.cat([memory_tokens, traj_latents], dim=1)
+            else:
+                hidden_states = traj_latents
+            hidden_states_null = torch.zeros_like(hidden_states, device=device, dtype=dtype)
+            hidden_states_input = torch.cat([hidden_states_null, hidden_states], 0)
+            batch_size = traj_latents.shape[0]
+            latent_size = predict_step_nums
+            latent_channels = 3
 
-        traj_latents = self.cond_projector(traj_latents)
-        if use_async:
-            with torch.no_grad():
-                images_dp = images_dp.permute(0, 1, 4, 2, 3)
-                images_dp_norm = (images_dp - self.rgb_model._resnet_mean) / self.rgb_model._resnet_std
-                images_dp_feat = (
-                    self.rgb_model.get_intermediate_layers(images_dp_norm.flatten(0, 1).to(dtype))[0]
-                    .unflatten(dim=0, sizes=(1, -1))
+            latents = randn_tensor(
+                shape=(batch_size * num_sample_trajs, latent_size, latent_channels),
+                generator=None,
+                device=device,
+                dtype=dtype,
+            )
+
+            sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
+            scheduler.set_timesteps(num_inference_steps, sigmas=sigmas)
+
+            hidden_states_input = hidden_states_input.repeat_interleave(num_sample_trajs, dim=0)
+
+            for t in scheduler.timesteps:
+                latent_features = self.model.action_encoder(latents)
+                pos_ids = (
+                    torch.arange(latent_features.shape[1])
+                    .reshape(1, -1)
+                    .repeat(batch_size, 1)
+                    .to(latent_features.device)
                 )
-                memory_feat = self.memory_encoder(
-                    images_dp_feat.flatten(1, 2)
-                )  # [bs*select_size,512,384]
-                memory_feat = torch.cat([images_dp_feat.flatten(1, 2), memory_feat], dim=-1)
-                memory_tokens = self.rgb_resampler(memory_feat)
-            hidden_states = torch.cat([memory_tokens, traj_latents], dim=1)
-        else:
-            hidden_states = traj_latents
+                pos_embed = self.model.pos_encoding(pos_ids)
+                latent_features += pos_embed  # [num_sample_trajs, t, 384]
+                latent_model_input = latent_features.repeat(2, 1, 1)
+                if hasattr(scheduler, "scale_model_input"):
+                    latent_model_input = scheduler.scale_model_input(latent_model_input, t)
 
-        hidden_states_null = torch.zeros_like(hidden_states, device=device, dtype=dtype)
-        hidden_states_input = torch.cat([hidden_states_null, hidden_states], 0)
-        batch_size = traj_latents.shape[0]
-        latent_size = predict_step_nums
-        latent_channels = 3
+                # predict noise model_output
+                noise_pred = self.model.traj_dit(
+                    x=latent_model_input,
+                    timestep=t.unsqueeze(0)
+                    .expand(latent_model_input.shape[0])
+                    .to(latent_model_input.device, torch.long),
+                    z_latents=hidden_states_input,
+                )
 
-        latents = randn_tensor(
-            shape=(batch_size * num_sample_trajs, latent_size, latent_channels),
-            generator=None,
-            device=device,
-            dtype=dtype,
-        )
+                noise_pred = self.model.action_decoder(noise_pred)
 
-        sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-        scheduler.set_timesteps(num_inference_steps, sigmas=sigmas)
+                # perform guidance
+                noise_pred_uncond, noise_pred = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred - noise_pred_uncond)
 
-        hidden_states_input = hidden_states_input.repeat_interleave(num_sample_trajs, dim=0)
+                # compute previous: x_t -> x_t-1
+                latents = scheduler.step(noise_pred, t, latents).prev_sample
+            return latents.detach()
 
-        for t in scheduler.timesteps:
-            latent_features = self.action_encoder(latents)
-            pos_ids = (
-                torch.arange(latent_features.shape[1])
-                .reshape(1, -1)
-                .repeat(batch_size, 1)
-                .to(latent_features.device)
-            )
-            pos_embed = self.pos_encoding(pos_ids)
-            latent_features += pos_embed  # [num_sample_trajs, t, 384]
-            latent_model_input = latent_features.repeat(2, 1, 1)
-            if hasattr(scheduler, "scale_model_input"):
-                latent_model_input = scheduler.scale_model_input(latent_model_input, t)
-
-            # predict noise model_output
-            noise_pred = self.traj_dit(
-                x=latent_model_input,
-                timestep=t.unsqueeze(0)
-                .expand(latent_model_input.shape[0])
-                .to(latent_model_input.device, torch.long),
-                z_latents=hidden_states_input,
-            )
-
-            noise_pred = self.action_decoder(noise_pred)
-
-            # perform guidance
-            noise_pred_uncond, noise_pred = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred - noise_pred_uncond)
-
-            # compute previous: x_t -> x_t-1
-            latents = scheduler.step(noise_pred, t, latents).prev_sample
-        return latents.detach()
-
-    def step_s1_navdp(self, traj_latents, images_dp=None, depths_dp=None, use_async=False):
-        if use_async:
-            all_trajs = self.model.predict_pointgoal_action_async(
-                traj_latents, images_dp, depths_dp
-            )
-        else:
-            all_trajs = self.model.predict_pointgoal_action(traj_latents)
-        return all_trajs
+        elif 'navdp' in self.config['system1']:
+            if 'async' in self.config['system1']:
+                all_trajs = self.model.navdp.predict_pointgoal_action_async(
+                    traj_latents, images_dp, depths_dp
+                )
+            else:
+                all_trajs = self.model.navdp.predict_pointgoal_action(traj_latents)
+            return all_trajs
     
     def reset(self, reset_index=None):
         pass

@@ -7,10 +7,12 @@ LatentEmbSize = 768
 MODEL_PATH_TO = "checkpoints"
 
 
-def build_navdp(navdp_cfg, memory_size):
+def build_navdp(navdp_cfg, memory_size, navdp_pretrained=None):
     from .navdp import NavDP_Policy_DPT_CriticSum_DAT
 
-    navdp = NavDP_Policy_DPT_CriticSum_DAT(memory_size=memory_size, navdp_version=0.1)
+    navdp = NavDP_Policy_DPT_CriticSum_DAT(memory_size=memory_size, 
+                                           navdp_version=0.1, 
+                                           navdp_pretrained=navdp_pretrained)
     navdp.load_model()
     return navdp
 
@@ -171,6 +173,42 @@ class InternVLAN1MetaModel:
             print("random initiation the latent_queries !!!")
             self.latent_queries = nn.Parameter(torch.randn(1, self.config.n_query, self.config.hidden_size))
 
+
+class AsyncInternVLAN1MetaModel(nn.Module):
+    def __init__(self, config: dict):
+        super(AsyncInternVLAN1MetaModel, self).__init__()
+        if "system1" in config:
+            self.latent_queries = nn.Parameter(torch.randn(1, config['n_query'], config['hidden_size']))
+
+            if 'nextdit' in config['system1']:
+                self.traj_dit, self.noise_scheduler = build_traj_dit(config)
+                self.action_encoder = nn.Linear(3, 384, bias=True)
+                self.pos_encoding = SinusoidalPositionalEncoding(384)
+                self.action_decoder = nn.Linear(384, 3, bias=True)
+                self.cond_projector = nn.Sequential(
+                    nn.Linear(3584, LatentEmbSize), 
+                    nn.GELU(approximate="tanh"), 
+                    nn.Linear(LatentEmbSize, LatentEmbSize)
+                )
+
+                if 'async' in config['system1']:
+                    self.rgb_model = build_depthanythingv2(config)
+                    self.memory_encoder = MemoryEncoder()
+                    self.rgb_resampler = QFormer()
+                    
+                    _RESNET_MEAN = [0.485, 0.456, 0.406]
+                    _RESNET_STD = [0.229, 0.224, 0.225]
+                    for name, value in (("_resnet_mean", _RESNET_MEAN), ("_resnet_std", _RESNET_STD)):
+                        value = torch.tensor(value).view(1, 1, 3, 1, 1)
+                        self.register_buffer(name, value, persistent=False)
+
+            elif 'navdp' in config['system1']:
+                if 'async' in config['system1']:
+                    self.navdp = build_navdp(config, memory_size=2, 
+                                             navdp_pretrained=config['navdp_pretrained'])
+            else:
+                raise NotImplementedError
+            
 
 class InternVLAN1MetaForCausalLM(ABC):
     @abstractmethod

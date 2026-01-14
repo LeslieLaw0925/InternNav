@@ -1,3 +1,7 @@
+import sys
+sys.path.append('.')
+sys.path.append('./src/diffusion-policy')
+
 import torch
 import torch.nn as nn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
