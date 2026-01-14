@@ -176,10 +176,8 @@ class InternVLAN1MetaModel:
 
 class AsyncInternVLAN1MetaModel(nn.Module):
     def __init__(self, config: dict):
-        super(AsyncInternVLAN1MetaModel, self).__init__()
+        super().__init__()
         if "system1" in config:
-            self.latent_queries = nn.Parameter(torch.randn(1, config['n_query'], config['hidden_size']))
-
             if 'nextdit' in config['system1']:
                 self.traj_dit, self.noise_scheduler = build_traj_dit(config)
                 self.action_encoder = nn.Linear(3, 384, bias=True)

@@ -4,9 +4,6 @@ import os
 import re
 from collections import OrderedDict
 import json
-# import sys
-# sys.path.append('.')
-# sys.path.append('./src/diffusion-policy')
 
 import cv2
 import imageio
@@ -17,7 +14,6 @@ from transformers import AutoProcessor, AutoTokenizer
 import ray
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils.torch_utils import randn_tensor
-import torch.nn as nn
 
 from internnav.agent.base import Agent
 from internnav.configs.agent import AgentCfg
@@ -190,8 +186,17 @@ class S1Agent:
         self.dtype = TROCH_DTYPE
         self.config = json.load(open(os.path.join(model_settings.model_path, 'config.json'), 'r'))
         self.config['navdp_pretrained'] = model_settings.navdp_pretrained
-        self.model = AsyncInternVLAN1MetaModel(self.config).to(self.device, self.dtype)
-
+        self.model = AsyncInternVLAN1MetaModel(self.config)
+        
+        if 'nextdit' in self.config['system1']:
+            self.model.load_state_dict(
+                torch.load(model_settings.nextdit_pretrained, map_location="cpu"))
+            self.model.to(self.device, self.dtype)
+        elif 'navdp' in self.config['system1']:
+            self.model.navdp.to(self.device, self.dtype)
+        else:
+            raise NotImplementedError
+        
         self.depth_threshold = 5.0
 
     def step(self, rgb: np.ndarray, depth: np.ndarray = None):
@@ -225,9 +230,9 @@ class S1Agent:
         else:
             depths = None
 
-        dp_actions = self.step_s1(traj_latents.to(self.device),
-                                rgbs, 
-                                depths_dp=depths)
+        with torch.no_grad():
+            dp_actions = self.step_s1(traj_latents.to(self.device), rgbs, 
+                                    depths_dp=depths)
             
         action_list = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]

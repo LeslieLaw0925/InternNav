@@ -37,6 +37,18 @@ class InternVLAN1AsyncAgent:
         self.model.eval()
         self.model.to(self.device)
 
+        state_dict = {}
+        idx = 0
+        for name, param in self.model.named_parameters():
+            if idx >= 729 and name.strip() != "lm_head.weight":
+                key = name.replace('model.', '', 1)
+                state_dict[key] = param.cpu()
+            idx += 1
+        print(state_dict.keys())
+        torch.save(state_dict, "checkpoints/nextdit_from_dual_vln.ckpt")
+
+        import pdb; pdb.set_trace()            
+
         self.processor = AutoProcessor.from_pretrained(args.model_path)
         self.processor.tokenizer.padding_side = 'left'
 
