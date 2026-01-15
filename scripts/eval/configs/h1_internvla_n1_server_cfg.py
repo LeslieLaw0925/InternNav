@@ -17,6 +17,9 @@ eval_cfg = EvalCfg(
             'env_num': 1,
             'sim_num': 1,
             'model_path': "checkpoints/InternVLA-N1-DualVLN",
+            # 'model_path': "checkpoints/InternVLA-N1-w-NavDP",
+            'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
+            'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
             'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],
             'width': 640,
             'height': 480,
@@ -77,6 +80,6 @@ eval_cfg = EvalCfg(
     eval_settings={
         'save_to_json': True,
         'vis_output': True,
-        'use_agent_server': False,  # If use_agent_server=True, please start the agent server first.
+        'use_agent_server': True,  # If use_agent_server=True, please start the agent server first.
     },
 )
