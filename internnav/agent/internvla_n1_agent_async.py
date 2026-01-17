@@ -68,6 +68,7 @@ class VLNArbiterAgent(Agent):
         self.forward_step_num: int = 0
         self.output_pixel = None
         self.which_is_inferring: str = "s2"
+        self.traj_latents = None
 
         # vis debug
         self.vis_debug = vln_sensor_config['vis_debug']
@@ -102,6 +103,7 @@ class VLNArbiterAgent(Agent):
         self.forward_step_num = 0
         self.output_pixel = None
         self.which_is_inferring = "s2"
+        self.traj_latents = None
 
         if self.vis_debug:
             self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async.mp4", fps=5)
@@ -133,6 +135,8 @@ class VLNArbiterAgent(Agent):
             # 此时代表S2找到了pixel goal，获取pixel goal的rgb，depth，以及traj_latent
             self.s2_step(rgb, depth, pose, instruction, look_down=True)
             self.output_pixel = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL))
+            self.traj_latents = ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT))
+            self.traj_latents = self.traj_latents.to(dtype=torch.float32).numpy().tolist()
             # 启动S1进行轨迹输出
             self.action_seq = self.s1_step(rgb, depth)
 
@@ -172,7 +176,9 @@ class VLNArbiterAgent(Agent):
 
             self.fps_writer.append_data(vis)
 
-        return [{'action': output['action'], 'ideal_flag': True}]
+        return [{'action': output['action'], 
+                 'ideal_flag': True, 
+                 'traj_latent': self.traj_latents}]
 
 
 @ray.remote(num_gpus=0.2)

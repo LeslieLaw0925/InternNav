@@ -24,6 +24,7 @@ class S1AgentClient:
         self.server_url = f'http://{config.server_host}:{config.server_port}'
         self.agent_name = self._initialize_agent(config)
         self.s1_server_process = start_system1(config)
+        self.latest_traj_latents = None
 
     def _initialize_agent(self, config: AgentCfg) -> str:
         request_data = InitRequest(agent_config=config).model_dump(mode='json')
@@ -47,7 +48,11 @@ class S1AgentClient:
         )
         response.raise_for_status()
 
-        return response.json()['action']
+        response_data = response.json()
+        action: list = response_data.get('action')
+        self.latest_traj_latents = action[0].pop('traj_latent', None)
+        
+        return action
 
     def reset(self, reset_index: Optional[List] = None) -> None:
         response = requests.post(
