@@ -57,9 +57,11 @@ class DistributedEvaluator(Evaluator):
                 assert not is_dist_avail_and_initialized(), "agent server requires single evaluator process."
                 # set agent port based on rank
                 from internnav.utils import AgentClient
+                from internnav.utils.comm_utils.s1_client import S1AgentClient
 
                 print(f"[R{self.rank}] Connecting to agent server at port {eval_cfg.agent.server_port}")
-                self.agent = AgentClient(eval_cfg.agent)
+                # self.agent = AgentClient(eval_cfg.agent)
+                self.agent = S1AgentClient(eval_cfg.agent)
             else:
                 from internnav.agent import Agent
 

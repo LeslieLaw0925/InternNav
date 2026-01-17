@@ -2,6 +2,7 @@ import sys
 
 sys.path.append('.')
 
+import subprocess
 import argparse
 import importlib.util
 

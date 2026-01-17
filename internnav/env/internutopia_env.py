@@ -36,7 +36,7 @@ class InternutopiaEnv(base.Env):
             rank=env_settings['rank'],
             world_size=env_settings['world_size']
         )
-        self.episodes = generate_vln_episode(self.episode_loader, task_config)
+        self.episodes = generate_vln_episode(self.episode_loader, task_config)[18:19]
         if len(self.episodes) == 0:
             print("No episodes found for the given configuration.")
             sys.exit(0)

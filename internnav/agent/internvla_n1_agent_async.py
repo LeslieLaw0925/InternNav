@@ -18,8 +18,6 @@ from diffusers.utils.torch_utils import randn_tensor
 from internnav.agent.base import Agent
 from internnav.configs.agent import AgentCfg
 from internnav.configs.model.base_encoders import ModelCfg
-from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM
-from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
 from internnav.model.utils.vln_utils import split_and_clean, traj_to_actions
 from internnav.model.utils.misc import set_random_seed
 
@@ -59,8 +57,8 @@ class VLNArbiterAgent(Agent):
         _model_settings = ModelCfg(**vln_sensor_config)
 
         self.shm = SharedMemory.remote()
-        self.s1_agent = S1Agent.remote(self.shm, _model_settings)
-        self.s2_agent = S2Agent.remote(self.shm, _model_settings)
+        self.s1_agent = S1Agent.remote(_model_settings, self.shm)
+        self.s2_agent = S2Agent.remote(_model_settings, self.shm)
         self.PLAN_STEP_GAP = getattr(_model_settings, 'plan_step_gap', 8)
 
         self.action_seq: list = []
@@ -179,7 +177,9 @@ class VLNArbiterAgent(Agent):
 
 @ray.remote(num_gpus=0.2)
 class S1Agent:
-    def __init__(self, shm, model_settings: ModelCfg):
+    def __init__(self, model_settings: ModelCfg, shm=None):
+        from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
+
         set_random_seed(0)
         self.shm = shm
         self.device = torch.device(model_settings.device)
@@ -340,7 +340,9 @@ class S1Agent:
 
 @ray.remote(num_gpus=0.8)
 class S2Agent:
-    def __init__(self, shm, model_settings: ModelCfg):
+    def __init__(self, model_settings: ModelCfg, shm=None):
+        from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM
+
         set_random_seed(0)
         self.shm = shm
         self.device = torch.device(model_settings.device)
