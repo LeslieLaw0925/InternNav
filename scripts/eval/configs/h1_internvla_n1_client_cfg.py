@@ -12,7 +12,6 @@ eval_cfg = EvalCfg(
     agent=AgentCfg(
         server_host='192.168.105.11',
         server_port=31885,
-        s1_port=8023,
         model_name='internvla_n1_arbiter',
         ckpt_path='',
         model_settings={

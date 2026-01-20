@@ -1,4 +1,3 @@
-import subprocess
 import base64
 import pickle
 from typing import Any, Dict, List, Optional
@@ -6,7 +5,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from internnav.configs.agent import AgentCfg, InitRequest, ResetRequest, StepRequest
-from internnav.utils.comm_utils.s1_server import start_system1
+from internnav.agent.internvla_n1_s1_agent import System1
 
 
 def serialize_obs(obs):
@@ -20,11 +19,17 @@ class S1AgentClient:
     Client class for Agent service with local S1.
     """
 
-    def __init__(self, config: AgentCfg):
+    def __init__(self, config: AgentCfg):        
         self.server_url = f'http://{config.server_host}:{config.server_port}'
+
         self.agent_name = self._initialize_agent(config)
-        self.s1_server_process = start_system1(config)
+        self.s1_server = System1(config)
+
         self.latest_traj_latents = None
+        self.pixel_goal_rgb = None
+        self.pixel_goal_depth = None
+        self.last_action: list = None
+        self.step_flag = 1
 
     def _initialize_agent(self, config: AgentCfg) -> str:
         request_data = InitRequest(agent_config=config).model_dump(mode='json')
@@ -39,6 +44,23 @@ class S1AgentClient:
         return response.json()['agent_name']
 
     def step(self, obs: List[Dict[str, Any]]) -> List[List[int]]:
+        if self.step_flag:
+            return self.cloud_step(obs)
+        else:
+            return self.local_s1_step(obs)
+    
+    def local_s1_step(self, obs: List[Dict[str, Any]]) -> List[List[int]]:
+        obs[0]['traj_latent'] = self.latest_traj_latents
+        obs[0]['pixel_goal_rgb'] = self.pixel_goal_rgb
+        obs[0]['pixel_goal_depth'] = self.pixel_goal_depth
+
+        return self.s1_server.step(obs[0])
+    
+    def cloud_step(self, obs: List[Dict[str, Any]]) -> List[List[int]]:
+        if self.last_action == [5]:
+            self.pixel_goal_rgb = obs[0].get('rgb')
+            self.pixel_goal_depth = obs[0].get('depth')
+
         request_data = StepRequest(observation=serialize_obs(obs)).model_dump(mode='json')
 
         response = requests.post(
@@ -50,8 +72,9 @@ class S1AgentClient:
 
         response_data = response.json()
         action: list = response_data.get('action')
-        self.latest_traj_latents = action[0].pop('traj_latent', None)
-        
+        self.latest_traj_latents = action[0].pop('traj_latent')
+        self.last_action = action[0].get('action')
+
         return action
 
     def reset(self, reset_index: Optional[List] = None) -> None:
@@ -62,5 +85,8 @@ class S1AgentClient:
         )
         response.raise_for_status()
 
-        
-
+        self.latest_traj_latents = None
+        self.pixel_goal_rgb = None
+        self.pixel_goal_depth = None
+        self.last_action: list = None
+        self.step_flag = 1

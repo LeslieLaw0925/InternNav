@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from PIL import Image
-import ray
+
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -37,10 +37,16 @@ class System1:
         
         self.depth_threshold = 5.0
 
-    def step(self, rgb: np.ndarray, depth: np.ndarray = None):
-        traj_latents = ray.get(self.shm.get.remote(SharedObjKeys.TRAJ_LATENT))
-        pixel_goal_rgb = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_RGB))
-        if not all([pixel_goal_rgb is not None, traj_latents is not None]):
+    def step(self, obs: dict):
+        rgb = obs.get('rgb', None)
+        depth = obs.get('depth', None)
+        pixel_goal_rgb = obs.get('pixel_goal_rgb', None)
+        pixel_goal_depth = obs.get('pixel_goal_depth', None)
+        traj_latents = obs.get('traj_latent', None)
+
+        if not all([rgb is not None, 
+                    pixel_goal_rgb is not None, 
+                    traj_latents is not None]):
             return None
         
         processed_pixel_rgb = (np.array(Image.fromarray(pixel_goal_rgb).resize((224, 224))) / 255.0)
@@ -52,7 +58,6 @@ class System1:
         )  # [1, 2, 224, 224, 3]
 
         if depth is not None:
-            pixel_goal_depth = ray.get(self.shm.get.remote(SharedObjKeys.PIXEL_GOAL_DEPTH))
             processed_pixel_depth = (np.array(Image.fromarray(pixel_goal_depth[:, :, 0]).resize((224, 224))) * 10.0)
             processed_pixel_depth[processed_pixel_depth > self.depth_threshold] = self.depth_threshold
 
@@ -68,18 +73,20 @@ class System1:
         else:
             depths = None
 
+        traj_latents = torch.from_numpy(np.array(traj_latents)).\
+            to(self.device, self.dtype)
         with torch.no_grad():
-            dp_actions = self.step_s1(traj_latents.to(self.device), rgbs, 
-                                    depths_dp=depths)
+            dp_actions = self.step_s1(traj_latents, rgbs, depths_dp=depths)
             
         action_list = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]
 
         if action_list == []:
-            return [-1]
+            action_list = [-1]
         else:
-            return action_list[:4]
-    
+            action_list = action_list[:4]
+        
+        return [{'action': action_list, 'ideal_flag': True}]
 
     def step_s1(
         self,
