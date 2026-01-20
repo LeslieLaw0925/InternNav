@@ -400,7 +400,11 @@ class InternVLAN1Agent(Agent):
 
         self.episode_step += 1
         if 'action' in output:
-            return [{'action': output['action'], 'ideal_flag': True}]
+            output_latent = None
+            if self.s2_output.output_latent is not None:
+                output_latent = self.s2_output.output_latent.detach().cpu().to(dtype=torch.float32).numpy().tolist()
+
+            return [{'action': output['action'], 'ideal_flag': True, 'traj_latents': output_latent}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False}]
         else:

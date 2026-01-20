@@ -131,6 +131,7 @@ class VLNArbiterAgent(Agent):
         instruction = obs['instruction']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
         
+        self.traj_latents = None
         if self.last_action == 5:
             # 此时代表S2找到了pixel goal，获取pixel goal的rgb，depth，以及traj_latent
             self.s2_step(rgb, depth, pose, instruction, look_down=True)

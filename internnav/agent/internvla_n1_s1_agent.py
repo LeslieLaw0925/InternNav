@@ -36,18 +36,23 @@ class System1:
             raise NotImplementedError
         
         self.depth_threshold = 5.0
+        self.action_list = None
 
     def step(self, obs: dict):
+        if self.action_list is not None and len(self.action_list) > 0:
+            action = self.action_list.pop(0)
+            return [{'action': [action], 'ideal_flag': True}]
+
         rgb = obs.get('rgb', None)
         depth = obs.get('depth', None)
         pixel_goal_rgb = obs.get('pixel_goal_rgb', None)
         pixel_goal_depth = obs.get('pixel_goal_depth', None)
-        traj_latents = obs.get('traj_latent', None)
+        traj_latents = obs.get('traj_latents', None)
 
         if not all([rgb is not None, 
                     pixel_goal_rgb is not None, 
                     traj_latents is not None]):
-            return None
+            raise ValueError("Missing required observation for System1 step.")
         
         processed_pixel_rgb = (np.array(Image.fromarray(pixel_goal_rgb).resize((224, 224))) / 255.0)
         processed_rgb = np.array(Image.fromarray(rgb).resize((224, 224))) / 255.0
@@ -85,8 +90,9 @@ class System1:
             action_list = [-1]
         else:
             action_list = action_list[:4]
-        
-        return [{'action': action_list, 'ideal_flag': True}]
+
+        self.action_list = action_list
+        return [{'action': [self.action_list.pop(0)], 'ideal_flag': True}]
 
     def step_s1(
         self,

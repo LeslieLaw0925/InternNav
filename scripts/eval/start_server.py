@@ -38,7 +38,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     if args.config:
         eval_cfg = load_eval_cfg(args.config)
-        args.port = eval_cfg.agent.server_port
+        args.port = eval_cfg.agent.local_server_port
     else:
         print(f"Warning: No config file provided, using port {args.port}")
 

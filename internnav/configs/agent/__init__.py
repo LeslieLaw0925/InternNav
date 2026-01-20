@@ -4,9 +4,9 @@ from pydantic import BaseModel
 
 
 class AgentCfg(BaseModel):
-    server_host: str = 'localhost'
-    server_port: int = 8087
-    s1_port: int = 8022
+    cloud_server_host: str = 'localhost'
+    cloud_server_port: int = 8087
+    local_server_port: int = 8022
     model_name: str
     ckpt_path: str = None
     model_settings: Dict[str, Any]
