@@ -18,9 +18,9 @@ eval_cfg = EvalCfg(
         model_settings={
             'env_num': 1,
             'sim_num': 1,
-            'model_path': "checkpoints/InternVLA-N1-DualVLN",
-            # 'model_path': "checkpoints/InternVLA-N1-w-NavDP",
-            's1_type': 'nextdit_async', # or 'navdp_async'
+            # 'model_path': "checkpoints/InternVLA-N1-DualVLN",
+            'model_path': "checkpoints/InternVLA-N1-w-NavDP",
+            's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
             'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
             'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
             'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],

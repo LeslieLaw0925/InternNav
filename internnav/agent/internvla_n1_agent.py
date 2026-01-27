@@ -249,6 +249,8 @@ class InternVLAN1Agent(Agent):
         instruction = obs['instruction']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 
+        output_latent = None
+
         # S2 inference is done in a separate thread
         if self.should_infer_s2(mode) or self.look_down:  # The look down frame must be inferred
             print(f"======== Infer S2 at step {self.episode_step}========")
@@ -304,6 +306,7 @@ class InternVLAN1Agent(Agent):
             if self.s2_output.output_latent is not None:
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
                 print(self.output_pixel)
+                output_latent = self.s2_output.output_latent.detach().cpu().to(dtype=torch.float32).numpy().tolist()
 
                 if mode != 'sync':
                     processed_pixel_rgb = (
@@ -400,10 +403,6 @@ class InternVLAN1Agent(Agent):
 
         self.episode_step += 1
         if 'action' in output:
-            output_latent = None
-            if self.s2_output.output_latent is not None:
-                output_latent = self.s2_output.output_latent.detach().cpu().to(dtype=torch.float32).numpy().tolist()
-
             return [{'action': output['action'], 'ideal_flag': True, 'traj_latents': output_latent}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False}]

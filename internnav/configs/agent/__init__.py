@@ -22,6 +22,7 @@ class StepRequest(BaseModel, extra='allow'):
 
 class ResetRequest(BaseModel):
     reset_index: Optional[List]
+    partial_reset: bool = False
 
 
 __all__ = ['AgentCfg', 'InitRequest', 'StepRequest', 'ResetRequest']

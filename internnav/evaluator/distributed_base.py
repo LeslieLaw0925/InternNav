@@ -59,7 +59,7 @@ class DistributedEvaluator(Evaluator):
                 from internnav.utils import AgentClient
                 from internnav.utils.comm_utils.s1_client import S1AgentClient
 
-                print(f"[R{self.rank}] Connecting to agent server at port {eval_cfg.agent.server_port}")
+                print(f"[R{self.rank}] Connecting to agent server at port {eval_cfg.agent.local_server_port}")
                 # self.agent = AgentClient(eval_cfg.agent)
                 self.agent = S1AgentClient(eval_cfg.agent)
             else:

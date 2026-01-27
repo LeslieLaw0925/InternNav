@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from PIL import Image
+import time
 
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils.torch_utils import randn_tensor
@@ -10,6 +11,7 @@ from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model.utils.vln_utils import traj_to_actions
 from internnav.model.utils.misc import set_random_seed
 from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
+from internnav.utils.common_log_util import common_logger as log
 
 
 class System1:
@@ -80,8 +82,10 @@ class System1:
 
         traj_latents = torch.from_numpy(np.array(traj_latents)).\
             to(self.device, self.dtype)
+        start_time = time.time()
         with torch.no_grad():
             dp_actions = self.step_s1(traj_latents, rgbs, depths_dp=depths)
+        log.info(f'[TIME] On-device system1 step time: {time.time() - start_time:.2f} s')
             
         action_list = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]
@@ -187,4 +191,4 @@ class System1:
             return all_trajs
         
     def reset(self, reset_index=None):
-        pass
+        self.action_list = None

@@ -83,19 +83,8 @@ class VLNArbiterAgent(Agent):
         ray.kill(self.s2_agent)
         ray.kill(self.shm)
 
-    def reset(self, reset_index=None):
-        self.s1_agent.reset.remote(reset_index)
-        self.s2_agent.reset.remote(reset_index)
+    def reset(self, reset_index=None, partial_reset=False):
         self.shm.clear.remote()
-
-        '''reset_index: [0]'''
-        if reset_index is not None:
-            self.episode_idx += 1
-            if self.vis_debug:
-                self.fps_writer.close()
-                self.fps_writer2.close()
-        else:
-            self.episode_idx = -1
 
         self.action_seq = []
         self.last_action = -1
@@ -105,9 +94,22 @@ class VLNArbiterAgent(Agent):
         self.which_is_inferring = "s2"
         self.traj_latents = None
 
-        if self.vis_debug:
-            self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async.mp4", fps=5)
-            self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async_dp.mp4", fps=5)
+        if not partial_reset:
+            self.s1_agent.reset.remote(reset_index)
+            self.s2_agent.reset.remote(reset_index)
+            
+            '''reset_index: [0]'''
+            if reset_index is not None:
+                self.episode_idx += 1
+                if self.vis_debug:
+                    self.fps_writer.close()
+                    self.fps_writer2.close()
+            else:
+                self.episode_idx = -1
+
+            if self.vis_debug:
+                self.fps_writer = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async.mp4", fps=5)
+                self.fps_writer2 = imageio.get_writer(f"{self.debug_path}/fps_{self.episode_idx}_async_dp.mp4", fps=5)
 
     def s2_step(self, rgb, depth, pose, instruction, look_down=False):
         action_seq_ref = self.s2_agent.step.remote(rgb, depth, pose, instruction, \
@@ -179,7 +181,7 @@ class VLNArbiterAgent(Agent):
 
         return [{'action': output['action'], 
                  'ideal_flag': True, 
-                 'traj_latent': self.traj_latents}]
+                 'traj_latents': self.traj_latents}]
 
 
 @ray.remote(num_gpus=0.2)

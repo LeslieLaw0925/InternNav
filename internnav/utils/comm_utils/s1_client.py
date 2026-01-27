@@ -6,6 +6,7 @@ import requests
 
 from internnav.configs.agent import AgentCfg, InitRequest, ResetRequest, StepRequest
 from internnav.agent.internvla_n1_s1_agent import System1
+from internnav.utils.locomotion_detect_utils import TurnDetector
 
 
 def serialize_obs(obs):
@@ -25,11 +26,13 @@ class S1AgentClient:
         self.agent_name = self._initialize_agent(config)
         self.s1_server = System1(config)
 
+        self.turn_detector = TurnDetector(window_size=4, threshold_angle=45)
+
         self.latest_traj_latents = None
+        self.current_traj_latents = None
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
         self.last_action: list = None
-        self.step_flag = -1
 
         self.s1_rate_threshold = 8
 
@@ -47,19 +50,25 @@ class S1AgentClient:
 
     def step(self, obs: List[Dict[str, Any]]) -> List[List[int]]:
         # TODO: decide to use cloud service or local S1
-        if self.step_flag < 0:
-            return self.cloud_step(obs)
-        else:
+        is_turning = self.turn_detector.process_frame(obs[0]['rgb'])
+
+        if self.latest_traj_latents is not None and not is_turning:
+            # Reset server to clear previous latents
+            response = requests.post(
+            url=f'{self.server_url}/agent/{self.agent_name}/reset',
+                json=ResetRequest(reset_index=None, partial_reset=True).model_dump(mode='json'),
+                headers={'Content-Type': 'application/json'},
+            )
+            response.raise_for_status()
+
             return self.local_s1_step(obs)
+        else:
+            return self.cloud_step(obs)
     
     def local_s1_step(self, obs: List[Dict[str, Any]]) -> List[List[int]]:
         obs[0]['traj_latents'] = self.latest_traj_latents
         obs[0]['pixel_goal_rgb'] = self.pixel_goal_rgb
         obs[0]['pixel_goal_depth'] = self.pixel_goal_depth
-
-        self.step_flag += 1
-        if self.step_flag > self.s1_rate_threshold:
-            self.step_flag = -1
 
         return self.s1_server.step(obs[0])
     
@@ -75,9 +84,9 @@ class S1AgentClient:
 
         response_data = response.json()
         action: list = response_data.get('action')
-        self.latest_traj_latents = action[0].pop('traj_latents')
-        if self.latest_traj_latents is not None:
-            self.step_flag += 1
+        latest_traj_latents = action[0].pop('traj_latents')
+        if latest_traj_latents is not None:
+            self.latest_traj_latents = latest_traj_latents
             self.pixel_goal_rgb = obs[0].get('rgb')
             self.pixel_goal_depth = obs[0].get('depth')
 
@@ -91,8 +100,11 @@ class S1AgentClient:
         )
         response.raise_for_status()
 
+        self.s1_server.reset(reset_index)
+
+        self.turn_detector.reset()
+
         self.latest_traj_latents = None
         self.pixel_goal_rgb = None
         self.pixel_goal_depth = None
         self.last_action: list = None
-        self.step_flag = -1
