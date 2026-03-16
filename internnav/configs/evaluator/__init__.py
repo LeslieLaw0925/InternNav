@@ -2,7 +2,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from internnav.configs.agent import AgentCfg
+from internnav.configs.agent import AgentCfg, NewAgentCfg
 
 
 class EnvCfg(BaseModel):
@@ -60,7 +60,7 @@ class EvalDatasetCfg(BaseModel):
 class EvalCfg(BaseModel):
     eval_type: Optional[str] = None
     eval_settings: Optional[Dict[str, Any]] = {}
-    agent: Optional[AgentCfg] = None
+    agent: Optional[NewAgentCfg] = None
     env: EnvCfg = None
     task: TaskCfg = None
     dataset: EvalDatasetCfg = None

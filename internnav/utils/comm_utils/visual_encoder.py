@@ -1,0 +1,267 @@
+import json
+import cv2
+import numpy as np
+import math
+
+from PIL import Image
+import torch
+from transformers import (
+    Qwen2_5_VisionTransformerPretrainedModel,
+    PretrainedConfig,
+    AutoProcessor, 
+    AutoTokenizer,
+)
+
+from internnav import model
+
+
+class Qwen2_5_VLVisionConfig(PretrainedConfig):
+    model_type = "qwen2_5_vl"
+    base_config_key = "vision_config"
+
+    def __init__(
+        self,
+        depth=32,
+        hidden_size=3584,
+        hidden_act="silu",
+        intermediate_size=3420,
+        num_heads=16,
+        in_channels=3,
+        patch_size=14,
+        spatial_merge_size=2,
+        temporal_patch_size=2,
+        tokens_per_second=4,
+        window_size=112,
+        out_hidden_size=3584,
+        fullatt_block_indexes=[7, 15, 23, 31],
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.depth = depth
+        self.hidden_size = hidden_size
+        self.hidden_act = hidden_act
+        self.intermediate_size = intermediate_size
+        self.num_heads = num_heads
+        self.in_channels = in_channels
+        self.patch_size = patch_size
+        self.spatial_merge_size = spatial_merge_size
+        self.temporal_patch_size = temporal_patch_size
+        self.tokens_per_second = tokens_per_second
+        self.window_size = window_size
+        self.fullatt_block_indexes = fullatt_block_indexes
+        self.out_hidden_size = out_hidden_size
+
+
+class VisionEncoder:
+
+    def __init__(self, device='cuda'):
+        self.device = device
+
+        vit_path = 'checkpoints/Qwen2_5_VisionTransformer/vit_from_dual_vln.ckpt'
+        config_path = 'checkpoints/Qwen2_5_VisionTransformer/config.json'
+        config = json.load(open(config_path, 'r'))
+
+        model_dir = 'checkpoints/Qwen2_5_VisionTransformer'
+
+        vision_config = config.get("vision_config", None)
+        vision_config = Qwen2_5_VLVisionConfig(**vision_config)
+        self.vit_model = Qwen2_5_VisionTransformerPretrainedModel._from_config(vision_config, 
+                                                                               attn_implementation="flash_attention_2")
+        self.vit_model.load_state_dict(torch.load(vit_path, map_location="cpu"), strict=True)
+        self.vit_model.to(device=self.device, dtype=torch.bfloat16)
+
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+        self.processor = AutoProcessor.from_pretrained(model_dir)
+        self.processor.tokenizer = tokenizer
+        self.processor.tokenizer.padding_side = 'left'
+
+    def get_patch_importance(self, image: np.ndarray):
+        text = self.processor.apply_chat_template([""], tokenize=False, add_generation_prompt=True)
+        image = Image.fromarray(image)
+        inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
+
+        image_grid_thw = inputs.get('image_grid_thw')
+        h_grid, w_grid = image_grid_thw[0][1].item(), image_grid_thw[0][2].item()
+        pixel_values = inputs.get('pixel_values')
+
+        with torch.no_grad():
+            merger_outputs, outputs = self.vit_model(pixel_values, image_grid_thw)
+        merger_shape = merger_outputs.shape[0]
+        output_shape = outputs.shape[0]
+        merger_scale = math.sqrt(output_shape / merger_shape)
+
+        h_grid, w_grid = int(h_grid / merger_scale), int(w_grid / merger_scale)
+        patch_importance = torch.norm(merger_outputs, dim=-1)
+        patch_importance = patch_importance / patch_importance.max() # 归一化到0-1
+        patch_importance = patch_importance.reshape(h_grid, w_grid)
+        patch_importance = patch_importance.cpu().to(dtype=torch.float32).numpy()
+
+        # img_width, img_height = image.size
+        # pixel_importance = cv2.resize(
+        #     patch_importance,
+        #     (img_width, img_height),
+        #     interpolation=cv2.INTER_CUBIC
+        # )
+        return patch_importance
+
+def adaptive_compression_v2(image, patch_importance, threshold=0.1):
+    """
+    通过对非重要区域进行强模糊来减小文件体积，同时 100% 保留重要区域
+    """
+    h, w, c = image.shape
+    
+    # 1. 将 Patch Importance 转换为二值掩码 (0 或 1)
+    # 只有重要性大于阈值的 patch 才设为 1
+    threshold = np.percentile(patch_importance, (1 - threshold) * 100)  # 根据百分位数动态确定阈值
+    binary_patch_mask = (patch_importance >= threshold).astype(np.float32)
+    
+    # 2. 将掩码放大到原图尺寸
+    # 使用 cv2.INTER_NEAREST 保证 Patch 边缘清晰，不产生中间值
+    mask = cv2.resize(binary_patch_mask, (w, h), interpolation=cv2.INTER_NEAREST)
+    mask = np.stack([mask] * 3, axis=-1)
+    
+    # 3. 对全图进行强力模糊（这是压缩体积的关键）
+    # 模糊程度越高，非重要区域的熵越低，压缩后的 buffer 越小
+    low_quality_area = cv2.GaussianBlur(image, (51, 51), 4)
+    
+    # 4. 硬合成：重要区域 100% 像素保留，非重要区域 100% 模糊
+    # final = 原图(重要部分) + 模糊图(非重要部分)
+    final_img = (image * mask + low_quality_area * (1 - mask)).astype(np.uint8)
+    
+    return final_img
+
+
+def compress_image_by_patch(image, patch_importance, 
+                            thresholds=(0.12, 0.08), 
+                            patch_size=14, 
+                            quality_levels=None):
+    """
+    根据 Patch 重要性对图像进行局部压缩
+    :param image: 输入图像 (H, W, 3)
+    :param patch_importance: 重要性矩阵 (h_patches, w_patches)，值通常在 [0, 1]
+    :param patch_size: ViT 的 patch 大小
+    :param quality_levels: 字典，定义重要性区间对应的 JPEG 质量 (0-100)
+    :return: 压缩后的图像
+    """
+    if quality_levels is None:
+        # 默认分三档：高、中、低重要性
+        quality_levels = {
+            'high': 90,   # 重要性 > 0.7
+            'medium': 50, # 0.3 <= 重要性 <= 0.7
+            'low': 10     # 重要性 < 0.3
+        }
+
+    h, w, c = image.shape
+    h_patches, w_patches = patch_importance.shape
+    
+    # 创建一个空的目标图像
+    compressed_img = np.zeros_like(image)
+
+    for i in range(h_patches):
+        for j in range(w_patches):
+            # 1. 确定当前 patch 的像素坐标范围
+            y1, y2 = i * patch_size, (i + 1) * patch_size
+            x1, x2 = j * patch_size, (j + 1) * patch_size
+
+            x2 = min(x2, w)
+            y2 = min(y2, h)  # 防止越界
+            
+            patch = image[y1:y2, x1:x2]
+            score = patch_importance[i, j]
+
+            # 2. 根据得分确定压缩质量系数
+            if score > thresholds[0]:
+                q = quality_levels['high']
+            elif score > thresholds[1]:
+                q = quality_levels['medium']
+            else:
+                q = quality_levels['low']
+
+            # 3. 对单个 Patch 执行压缩/解压模拟 (JPEG 压缩)
+            # 注意：实际存储时需特殊格式，此处代码演示的是“质量损失”的效果
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), q]
+            _, encimg = cv2.imencode('.jpg', patch, encode_param)
+            decimg = cv2.imdecode(encimg, 1)
+
+            # 4. 放回原位置
+            compressed_img[y1:y2, x1:x2] = decimg
+
+    return compressed_img
+
+
+def verify_communication_reduction(original_img, processed_img, quality=90):
+    # 将图像编码为内存缓冲区，模拟网络传输的数据流
+    _, buffer_orig = cv2.imencode('.jpg', original_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    _, buffer_proc = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    
+    size_orig = len(buffer_orig) / 1024  # KB
+    size_proc = len(buffer_proc) / 1024  # KB
+    reduction = (1 - size_proc / size_orig) * 100
+    
+    print(f"原始通信量: {size_orig:.2f} KB")
+    print(f"处理后通信量: {size_proc:.2f} KB")
+    print(f"通信量减少了: {reduction:.2f}%")
+    
+    return size_orig, size_proc
+
+
+def solve(thresholds, data_sizes):
+    from scipy.optimize import curve_fit
+
+    # 线性拟合
+    thresholds = thresholds.reshape(-1, 1)  # 转换为二维数组
+    data_sizes = data_sizes.reshape(-1, 1)
+
+    # 2. 定义拟合函数
+    def quadratic_func(x, a, b, c):
+        return a * x**2 + b * x + c
+
+    model = LinearRegression()
+    model.fit(thresholds, data_sizes)
+
+    k = model.coef_[0][0]
+    b = model.intercept_[0]
+
+    print(f"拟合方程: Size = {k:.2f} * Threshold + {b:.2f}")
+    print(f"相关系数 (R²): {model.score(thresholds, data_sizes):.4f}")
+
+    return model
+
+
+if __name__ == "__main__":
+    import os
+    import time
+
+    image_path = '/home/smc/projects/InternNav/data/preview/vln_ce/traj_data/r2r/1LXtFkjw3qL/000087/videos/chunk-000/observation.images.rgb'
+    records = []
+    total_thresholds = []
+    thresholds = np.arange(0.1, 1.0, 0.05)
+
+    vision_encoder = VisionEncoder()
+
+    for img_file in os.listdir(image_path):
+        if not img_file.endswith('.jpg'):
+            continue
+        
+        image_file_path = os.path.join(image_path, img_file)
+        image = Image.open(image_file_path)
+
+        patch_importance = vision_encoder.get_patch_importance(np.array(image))
+        import pdb; pdb.set_trace()
+
+        start_time = time.time()
+
+        records = []
+        for threshold in thresholds:
+            compressed_img = adaptive_compression_v2(np.array(image), patch_importance, threshold=threshold)
+            _, compressed_buffer = cv2.imencode('.jpg', compressed_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            records.append(len(compressed_buffer))
+            total_thresholds.append(threshold)
+
+        liner_model = solve(np.array(thresholds), np.array(records))
+        
+        end_time = time.time()
+        print(f"处理 {img_file} 耗时: {end_time - start_time:.2f} 秒")
+
+       

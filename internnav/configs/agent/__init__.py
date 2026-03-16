@@ -11,8 +11,18 @@ class AgentCfg(BaseModel):
     model_settings: Dict[str, Any]
 
 
+class NewAgentCfg(BaseModel):
+    cloud_server_host: str = 'localhost'
+    cloud_server_port: int = 8087
+    local_server_port: int = 8022
+    model_name: str
+    ckpt_path: str = None
+    visual_encoder: str = None
+    model_settings: Dict[str, Any]
+
+
 class InitRequest(BaseModel, extra='allow'):
-    agent_config: AgentCfg
+    agent_config: NewAgentCfg
 
 
 class StepRequest(BaseModel, extra='allow'):
