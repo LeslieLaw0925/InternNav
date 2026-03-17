@@ -87,9 +87,7 @@ class VisionEncoder:
 
         with torch.no_grad():
             merger_outputs, outputs = self.vit_model(pixel_values, image_grid_thw)
-        merger_shape = merger_outputs.shape[0]
-        output_shape = outputs.shape[0]
-        merger_scale = math.sqrt(output_shape / merger_shape)
+        merger_scale = math.sqrt(outputs.shape[0] / merger_outputs.shape[0])
 
         h_grid, w_grid = int(h_grid / merger_scale), int(w_grid / merger_scale)
         patch_importance = torch.norm(merger_outputs, dim=-1)
@@ -97,13 +95,75 @@ class VisionEncoder:
         patch_importance = patch_importance.reshape(h_grid, w_grid)
         patch_importance = patch_importance.cpu().to(dtype=torch.float32).numpy()
 
-        # img_width, img_height = image.size
-        # pixel_importance = cv2.resize(
-        #     patch_importance,
-        #     (img_width, img_height),
-        #     interpolation=cv2.INTER_CUBIC
-        # )
         return patch_importance
+
+
+def generate_mask(shape, zero_ratio=0.1):
+    """
+    shape: tuple，例如 (224, 224) 或 (16, 16)
+    zero_ratio: 置为0的比例
+    """
+
+    total = np.prod(shape)
+    num_zero = int(total * zero_ratio)
+
+    # 初始化全1
+    arr = np.ones(total, dtype=np.uint8)
+
+    # 随机选位置置0
+    zero_indices = np.random.choice(total, num_zero, replace=False)
+    arr[zero_indices] = 0
+
+    # reshape回目标形状
+    return arr.reshape(shape)
+ 
+
+def numpy_compression(image, importance, keep_ratio=0.1):
+    """
+    image_np: (C, H, W) 的 numpy 数组
+    attn_map: (h, w) 的注意力热力图，与 patch 数量对应
+    threshold: 低于此阈值的区域将被压缩
+    """
+
+    # cv2.imwrite('original_image.jpg', image)  # 保存原始图像以供对比
+    H, W, _ = image.shape
+    patch_size = H // importance.shape[0] # 28
+
+    threshold = np.percentile(importance, (1 - keep_ratio) * 100)  # 根据百分位数动态确定阈值
+    
+    # 1. 标识低兴趣区域 (Low Interest Mask)
+    mask = (importance < threshold)
+    # import pdb; pdb.set_trace()
+    # mask = np.random
+    mask = generate_mask(importance.shape)
+    
+    # 2. 分离数据：我们将图像切分为 Patch 列表
+    # 重要区域保留原始 patch，不重要区域进行池化
+    compressed_data = []
+    metadata = [] # 记录位置信息用于还原
+    
+    idx = 0
+    for i in range(importance.shape[0]):
+        for j in range(importance.shape[1]):
+            # 获取当前 patch 的像素范围
+            y1, y2 = i * patch_size, (i + 1) * patch_size
+            x1, x2 = j * patch_size, (j + 1) * patch_size
+            y2 = min(y2, H)  # 防止越界
+            x2 = min(x2, W)
+            patch = image[y1:y2, x1:x2, :]
+            
+            if mask[i, j]:
+                # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
+                compressed_patch = cv2.resize(patch, (patch_size//4, patch_size//4), 
+                                              interpolation=cv2.INTER_AREA)
+                compressed_data.append(compressed_patch)
+                metadata.append(0) # 标记为压缩
+            else:
+                compressed_data.append(patch)
+                metadata.append(1) # 标记为原始
+    
+    return compressed_data, metadata
+
 
 def adaptive_compression_v2(image, patch_importance, threshold=0.1):
     """

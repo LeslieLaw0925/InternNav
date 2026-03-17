@@ -16,13 +16,13 @@ from internnav.configs.agent import AgentCfg, NewAgentCfg, InitRequest, ResetReq
 from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
 from .client_utils import init_visual_encoder, image_preprocess
-from .visual_encoder import VisionEncoder, compress_image_by_patch, adaptive_compression_v2
+from .visual_encoder import VisionEncoder, compress_image_by_patch, adaptive_compression_v2, numpy_compression
 
 
 def serialize_obs(obs):
-    img = obs[0]['rgb']
-    _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    obs[0]['rgb'] = buffer
+    # img = obs[0]['rgb']
+    # _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    # obs[0]['rgb'] = buffer
 
     serialized = pickle.dumps(obs)
     encoded = base64.b64encode(serialized).decode('utf-8')
@@ -89,16 +89,19 @@ class AgentClient:
         obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         orgin_rgb = obs[0]['rgb']
 
-        # serialized_obs = serialize_obs(obs)
-        # upload_data_size = len(serialized_obs)  # in bytes
+        serialized_obs = serialize_obs(obs)
+        upload_data_size = len(serialized_obs)  # in bytes
+        log.info(f"Original observation size: {upload_data_size / 1024:.2f} KB")
 
         # estimated_transmission_delay = self.estimate_transmission_time(upload_data_size)
         # if estimated_transmission_delay is not None and estimated_transmission_delay > self.transmission_delay_threshold:
         # log.info(f"[TIME] Estimated transmission time: {estimated_transmission_delay:.4f}s")
         preprocess_start_time = time()
-        # compressed_rgb = self.compress_rgb(orgin_rgb)
-        # obs[0]['rgb'] = compressed_rgb
+        compressed_rgb = self.compress_rgb(orgin_rgb)
+        obs[0]['rgb'] = compressed_rgb
+        obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
         serialized_obs = serialize_obs(obs)
+        log.info(f"Compressed observation size: {len(serialized_obs) / 1024:.2f} KB")
         preprocess_end_time = time()
         log.info(f"[TIME] Image compression time: {preprocess_end_time - preprocess_start_time:.4f}s")
 
@@ -166,16 +169,7 @@ class AgentClient:
 
     def compress_rgb(self, rgb: np.ndarray):
         patch_importance = self.vision_encoder.get_patch_importance(rgb)
-
-        _, origin_buffer = cv2.imencode('.jpg', np.array(rgb), [cv2.IMWRITE_JPEG_QUALITY, 90])
-        origin_size_kb = len(origin_buffer) / 1024
-        log.info(f"Original img buffer: {origin_size_kb:.2f} KB")
-
-        compressed_img = adaptive_compression_v2(rgb, patch_importance)
-        _, compressed_buffer = cv2.imencode('.jpg', np.array(compressed_img), [cv2.IMWRITE_JPEG_QUALITY, 90])
-        compressed_size_kb = len(compressed_buffer) / 1024
-        log.info(f"Compressed img buffer: {compressed_size_kb:.2f} KB")
-        log.info(f"Compression reduction ratio: {(origin_size_kb - compressed_size_kb) / origin_size_kb * 100:.2f}%")
+        compressed_img = numpy_compression(rgb, patch_importance)
         return compressed_img
     
     def estimate_transmission_time(self, upload_size_bytes):
