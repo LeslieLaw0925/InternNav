@@ -7,7 +7,7 @@ import time
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils.torch_utils import randn_tensor
 
-from internnav.configs.agent import AgentCfg
+from internnav.configs.agent import NewAgentCfg, AgentCfg
 from internnav.configs.model.base_encoders import ModelCfg
 from internnav.model.utils.vln_utils import traj_to_actions
 from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
@@ -15,24 +15,22 @@ from internnav.utils.common_log_util import common_logger as log
 
 
 class System1:
-    def __init__(self, config: AgentCfg):
+    def __init__(self, config: NewAgentCfg):
         from internnav.model.utils.misc import set_random_seed
 
         set_random_seed(0)
         vln_sensor_config = config.model_settings
-        model_settings = ModelCfg(**vln_sensor_config)
-
-        self.device = torch.device(model_settings.device)
+        self.device = "cuda"
         self.dtype = torch.bfloat16
-        self.config = dict(system1=model_settings.s1_type,
-                           navdp_pretrained=model_settings.navdp_pretrained,
-                           nextdit_pretrained=model_settings.nextdit_pretrained
+        self.config = dict(system1=vln_sensor_config.get('s1_type'),
+                           navdp_pretrained=vln_sensor_config.get('navdp_pretrained'),
+                           nextdit_pretrained=vln_sensor_config.get('nextdit_pretrained')
                            )
         self.model = AsyncInternVLAN1MetaModel(self.config)
 
         if 'nextdit' in self.config['system1']:
             self.model.load_state_dict(
-                torch.load(model_settings.nextdit_pretrained, map_location="cpu"))
+                torch.load(vln_sensor_config.get('nextdit_pretrained'), map_location="cpu"))
             self.model.to(self.device, self.dtype)
         elif 'navdp' in self.config['system1']:
             self.model.navdp.to(self.device, self.dtype)

@@ -33,4 +33,4 @@ class ResetRequest(BaseModel):
     reset_index: Optional[List]
 
 
-__all__ = ['AgentCfg', 'InitRequest', 'StepRequest', 'ResetRequest']
+__all__ = ['NewAgentCfg', 'AgentCfg', 'InitRequest', 'StepRequest', 'ResetRequest']

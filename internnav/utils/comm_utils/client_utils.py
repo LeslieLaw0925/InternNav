@@ -1,8 +1,8 @@
 import os
 import json
+import base64
+import pickle
 
-import numpy as np
-import cv2
 import torchvision.models as models
 import torch.nn as nn
 import torch
@@ -94,3 +94,16 @@ def init_vit_model(model_dir: str, device) -> Qwen2_5_VisionTransformerPretraine
     vit_model.to(device)
 
     return vit_model
+
+
+def serialize_obs(obs):
+    serialized = pickle.dumps(obs)
+    encoded = base64.b64encode(serialized).decode('utf-8')
+    return encoded
+
+
+def remove_from_obs(obs: dict) -> dict:
+    keys = ['globalgps', 'globalrotation', 'topdown_rgb', 'topdown_depth', 'instruction_tokens', 'depth']
+    for key in keys:
+        obs.pop(key, None)
+    return obs
