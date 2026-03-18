@@ -2,7 +2,7 @@ import base64
 import pickle
 from typing import Any, Dict, List, Optional
 from time import time
-import cv2
+import os
 
 import requests
 from PIL import Image
@@ -16,14 +16,10 @@ from internnav.configs.agent import AgentCfg, NewAgentCfg, InitRequest, ResetReq
 from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
 from .client_utils import init_visual_encoder, image_preprocess
-from .visual_encoder import VisionEncoder, compress_image_by_patch, adaptive_compression_v2, numpy_compression
+from .visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image, numpy_compression
 
 
 def serialize_obs(obs):
-    # img = obs[0]['rgb']
-    # _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-    # obs[0]['rgb'] = buffer
-
     serialized = pickle.dumps(obs)
     encoded = base64.b64encode(serialized).decode('utf-8')
     return encoded
@@ -57,6 +53,9 @@ class AgentClient:
         self.PLAN_STEP_GAP = 8
         self.compressed_ratios = np.arange(0.1, 1.0, 0.1)
         self.transmission_delay_threshold = 0.3  # Set a threshold for transmission delay (in seconds)
+        self.if_compressed = False
+
+        os.makedirs('logs/test_data', exist_ok=True)
 
     def _initialize_cloud_agent(self, config: NewAgentCfg) -> str:
         request_data = InitRequest(agent_config=config).model_dump(mode='json')
@@ -88,6 +87,7 @@ class AgentClient:
         obs[0] = remove_from_obs(obs[0])
         obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         orgin_rgb = obs[0]['rgb']
+        # draw_heatmap_on_image(orgin_rgb, self.vision_encoder.get_patch_importance(orgin_rgb))
 
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
@@ -96,14 +96,16 @@ class AgentClient:
         # estimated_transmission_delay = self.estimate_transmission_time(upload_data_size)
         # if estimated_transmission_delay is not None and estimated_transmission_delay > self.transmission_delay_threshold:
         # log.info(f"[TIME] Estimated transmission time: {estimated_transmission_delay:.4f}s")
-        preprocess_start_time = time()
-        compressed_rgb = self.compress_rgb(orgin_rgb)
-        obs[0]['rgb'] = compressed_rgb
-        obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
-        serialized_obs = serialize_obs(obs)
-        log.info(f"Compressed observation size: {len(serialized_obs) / 1024:.2f} KB")
-        preprocess_end_time = time()
-        log.info(f"[TIME] Image compression time: {preprocess_end_time - preprocess_start_time:.4f}s")
+        if self.if_compressed:
+            preprocess_start_time = time()
+            obs[0]['rgb'] = numpy_compression_v2(orgin_rgb)
+            obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
+            serialized_obs = serialize_obs(obs)
+            compressed_size = len(serialized_obs)  # in bytes
+            log.info(f"Compressed observation size: {compressed_size / 1024:.2f} KB")
+            log.info(f"Transmission size reduction ratio: {(upload_data_size - compressed_size) / upload_data_size * 100:.4f}%")
+            preprocess_end_time = time()
+            log.info(f"[TIME] Image compression time: {preprocess_end_time - preprocess_start_time:.4f}s")
 
         transmission_start_time = time()
         request_data = StepRequest(observation=serialized_obs).model_dump(mode='json')
@@ -113,7 +115,6 @@ class AgentClient:
             json=request_data,
             headers={'Content-Type': 'application/json'},
         )
-        # download_data_size = len(response.content)  # in bytes
         response.raise_for_status()
 
         response_data = response.json()
@@ -127,7 +128,7 @@ class AgentClient:
         log.info(f"[TIME] Cloud inference time: {cloud_inference_latency:.4f}s")
         log.info(f"[TIME] Actual transmission time: {transmission_latency:.4f}s")
 
-        self.update_bandwidth(len(serialized_obs), transmission_latency)
+        # self.update_bandwidth(compressed_size, transmission_latency)
 
         if self.current_stage == 's2':
             traj_latents = cloud_data.get('traj_latents', None)  # obtain traj_latents for System1

@@ -1,7 +1,9 @@
+import os
 import json
 import cv2
 import numpy as np
 import math
+import time
 
 from PIL import Image
 import torch
@@ -11,8 +13,6 @@ from transformers import (
     AutoProcessor, 
     AutoTokenizer,
 )
-
-from internnav import model
 
 
 class Qwen2_5_VLVisionConfig(PretrainedConfig):
@@ -98,7 +98,25 @@ class VisionEncoder:
         return patch_importance
 
 
-def generate_mask(shape, zero_ratio=0.1):
+def draw_heatmap_on_image(image, importance_map):
+    # importance_map: (h_grid, w_grid)，值在0-1之间
+    # h_grid, w_grid = importance_map.shape
+    h_img, w_img, _ = image.shape
+
+    # 将 importance_map 放大到图像尺寸
+    heatmap = cv2.resize(importance_map, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
+
+    # 将 heatmap 转换为颜色图（使用 colormap）
+    heatmap_color = cv2.applyColorMap((heatmap * 255).astype(np.uint8), cv2.COLORMAP_JET)
+
+    # 将热力图叠加到原图上，alpha 控制透明度
+    alpha = 0.5
+    overlayed_image = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
+
+    cv2.imwrite(f'logs/test_data/heatmap_overlay_{time.time()}.jpg', overlayed_image)  # 保存叠加后的图像以供对比
+
+
+def generate_mask(shape, zero_ratio=0.01):
     """
     shape: tuple，例如 (224, 224) 或 (16, 16)
     zero_ratio: 置为0的比例
@@ -116,9 +134,37 @@ def generate_mask(shape, zero_ratio=0.1):
 
     # reshape回目标形状
     return arr.reshape(shape)
- 
 
-def numpy_compression(image, importance, keep_ratio=0.1):
+
+def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=4):
+    """
+    image: (H, W, C) 的 numpy 数组
+    patch_size: 每个 patch 的大小，例如 14
+    compression_factor: 压缩因子，例如 4 表示将 patch 压缩到原来的1/4大小
+    """
+
+    H, W, _ = image.shape
+    new_H, new_W = H // patch_size + 1, W // patch_size + 1
+
+    compressed_data = []
+    
+    for i in range(new_H):
+        for j in range(new_W):
+            y1, y2 = i * patch_size, (i + 1) * patch_size
+            x1, x2 = j * patch_size, (j + 1) * patch_size
+            y2 = min(y2, H)  # 防止越界
+            x2 = min(x2, W)  # 防止越界
+
+            patch = image[y1:y2, x1:x2, :]
+            compressed_patch = cv2.resize(patch, 
+                                          (patch_size//compression_factor, patch_size//compression_factor), 
+                                          interpolation=cv2.INTER_AREA)
+            compressed_data.append(compressed_patch)
+    
+    return compressed_data
+
+
+def numpy_compression(image, importance, keep_ratio=0.01):
     """
     image_np: (C, H, W) 的 numpy 数组
     attn_map: (h, w) 的注意力热力图，与 patch 数量对应
@@ -127,15 +173,17 @@ def numpy_compression(image, importance, keep_ratio=0.1):
 
     # cv2.imwrite('original_image.jpg', image)  # 保存原始图像以供对比
     H, W, _ = image.shape
-    patch_size = H // importance.shape[0] # 28
+    patch_size = 100 # H // importance.shape[0] # 28
 
     threshold = np.percentile(importance, (1 - keep_ratio) * 100)  # 根据百分位数动态确定阈值
     
     # 1. 标识低兴趣区域 (Low Interest Mask)
-    mask = (importance < threshold)
+    # mask = (importance < threshold)
     # import pdb; pdb.set_trace()
     # mask = np.random
-    mask = generate_mask(importance.shape)
+    # mask = generate_mask(importance.shape, zero_ratio=0.01)
+    new_H, new_W = H // patch_size + 1, W // patch_size + 1
+    # mask = generate_mask((new_H, new_W), zero_ratio=0.01)
     
     # 2. 分离数据：我们将图像切分为 Patch 列表
     # 重要区域保留原始 patch，不重要区域进行池化
@@ -143,8 +191,10 @@ def numpy_compression(image, importance, keep_ratio=0.1):
     metadata = [] # 记录位置信息用于还原
     
     idx = 0
-    for i in range(importance.shape[0]):
-        for j in range(importance.shape[1]):
+    # for i in range(importance.shape[0]):
+    #     for j in range(importance.shape[1]):
+    for i in range(new_H):
+        for j in range(new_W):
             # 获取当前 patch 的像素范围
             y1, y2 = i * patch_size, (i + 1) * patch_size
             x1, x2 = j * patch_size, (j + 1) * patch_size
@@ -152,15 +202,19 @@ def numpy_compression(image, importance, keep_ratio=0.1):
             x2 = min(x2, W)
             patch = image[y1:y2, x1:x2, :]
             
-            if mask[i, j]:
-                # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
-                compressed_patch = cv2.resize(patch, (patch_size//4, patch_size//4), 
+            # if mask[i, j]:
+            #     # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
+            #     compressed_patch = cv2.resize(patch, (patch_size//4, patch_size//4), 
+            #                                   interpolation=cv2.INTER_AREA)
+            #     compressed_data.append(compressed_patch)
+            #     metadata.append(0) # 标记为压缩
+            # else:
+            #     compressed_data.append(patch)
+            #     metadata.append(1) # 标记为原始
+
+            compressed_patch = cv2.resize(patch, (patch_size//8, patch_size//8), 
                                               interpolation=cv2.INTER_AREA)
-                compressed_data.append(compressed_patch)
-                metadata.append(0) # 标记为压缩
-            else:
-                compressed_data.append(patch)
-                metadata.append(1) # 标记为原始
+            compressed_data.append(compressed_patch)
     
     return compressed_data, metadata
 
