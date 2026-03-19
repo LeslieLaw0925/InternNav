@@ -39,7 +39,7 @@ eval_cfg = EvalCfg(
             'continuous_traj': True,
             'infer_mode': 'partial_async',  # You can choose "sync" or "partial_async", but for this model, "partial_async" is better.
             # debug
-            'vis_debug': True,  # If vis_debug=True, you can get visualization results
+            'vis_debug': False,  # If vis_debug=True, you can get visualization results
             'vis_debug_path': './logs/test_n1/vis_debug',
         },
     ),

@@ -23,42 +23,6 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 TROCH_DTYPE = torch.bfloat16
 
 
-def init_swir_model(device):
-    from internnav.agent.swin_ir.network_swinir import SwinIR as net
-
-    model = net(upscale=1, in_chans=3, img_size=128, window_size=8,
-                img_range=1., depths=[6, 6, 6, 6, 6, 6], embed_dim=180, num_heads=[6, 6, 6, 6, 6, 6],
-                mlp_ratio=2, upsampler='', resi_connection='1conv')
-    param_key_g = 'params'
-    
-    model_path = 'checkpoints/005_colorDN_DFWB_s128w8_SwinIR-M_noise50.pth'
-    pretrained_model = torch.load(model_path)
-    model.load_state_dict(pretrained_model[param_key_g] if param_key_g in pretrained_model.keys() else pretrained_model, strict=True)
-    model.eval()
-    model = model.to(device)
-    return model
-
-
-def init_realgan_model():
-    from realesrgan import RealESRGANer
-    from basicsr.archs.rrdbnet_arch import RRDBNet
-
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-    netscale = 4
-
-    # restorer
-    upsampler = RealESRGANer(
-        scale=netscale,
-        model_path='checkpoints/RealESRGAN_x4plus_anime_6B.pth',
-        model=model,
-        tile=400,
-        tile_pad=10,
-        pre_pad=0,
-        half=True,
-        )
-    
-    return upsampler
-
 @Agent.register('internvla_n1_cloud')
 class CloudAgent(Agent):
     def __init__(self, config: AgentCfg):
@@ -67,7 +31,7 @@ class CloudAgent(Agent):
         _model_settings = ModelCfg(**vln_sensor_config)
         self.s2_agent = System2(_model_settings)
         self.device = torch.device(_model_settings.device)
-        # self.img_enchanced_model = init_realgan_model()
+        self.height, self.width = vln_sensor_config['height'], vln_sensor_config['width']
 
         self.action_seq: list = []
         self.last_action: int = -1
@@ -108,13 +72,11 @@ class CloudAgent(Agent):
         infer_start_time = time.time()
 
         obs = obs[0]  # do not support batch_env currently?
-        rgb = cv2.imdecode(obs['rgb'], cv2.IMREAD_COLOR)
-        # if obs['compressed'] == 1:
-        #     start_time = time.time()
-        #     rgb = self.img_restore(rgb)
-        #     rgb = self.img_enhance(rgb)
-        #     rgb = cv2.detailEnhance(rgb, sigma_s=10, sigma_r=0.15)
-        #     print(f"Image process time: {time.time() - start_time:.2f}s")
+        is_compressed = obs.get('compressed', 0)
+        if is_compressed:
+            rgb = self.restore_img(obs['rgb'])
+        else:
+            rgb = obs['rgb']
         
         depth = obs.get('depth', None)
         instruction = obs['instruction']
@@ -168,41 +130,46 @@ class CloudAgent(Agent):
         return [{'action': output['action'],
                  'ideal_flag': True, 
                  'traj_latents': traj_latents,
-                 'infer_start_time': infer_start_time,
-                 'infer_end_time': time.time()}]
+                 'processing_time': time.time() - infer_start_time}]
+    
+    def restore_img(self, compressed_data, patch_size=28):
+        """
+        compressed_data: 接收到的 list，包含不同尺寸的 patch
+        original_grid_shape: 元组 (h, w)，即 patch 的行列数 (例如 14x14)
+        patch_size: 每个正方形 patch 的原始边长 (像素)
+        """
 
-    def img_restore(self, img_lq: np.ndarray, window_size: int = 8):
-        img_lq = img_lq.astype(np.float32) / 255.
-        img_lq = np.transpose(img_lq if img_lq.shape[2] == 1 else img_lq[:, :, [2, 1, 0]], (2, 0, 1))  # HCW-BGR to CHW-RGB
-        img_lq = torch.from_numpy(img_lq).float().unsqueeze(0).to(self.device)  # CHW-RGB to NCHW-RGB
+        h, w = self.height // patch_size + 1, self.width // patch_size + 1
 
-        # inference
-        with torch.no_grad():
-            # pad input image to be a multiple of window_size
-            _, _, h_old, w_old = img_lq.size()
-            h_pad = (h_old // window_size + 1) * window_size - h_old
-            w_pad = (w_old // window_size + 1) * window_size - w_old
-            img_lq = torch.cat([img_lq, torch.flip(img_lq, [2])], 2)[:, :, :h_old + h_pad, :]
-            img_lq = torch.cat([img_lq, torch.flip(img_lq, [3])], 3)[:, :, :, :w_old + w_pad]
-            output = self.swin_ir_model(img_lq)
-            output = output[..., :h_old, :w_old]
-
-        # save image
-        output = output.data.squeeze().float().cpu().clamp_(0, 1).numpy()
-        if output.ndim == 3:
-            output = np.transpose(output[[2, 1, 0], :, :], (1, 2, 0))  # CHW-RGB to HCW-BGR
-        output = (output * 255.0).round().astype(np.uint8)  # float32 to uint8
+        # 1. 创建一个空白画布
+        reconstructed_img = np.zeros((self.height, self.width, 3), dtype=compressed_data[0].dtype)
         
-        return output
+        patch_idx = 0
+        for i in range(h):
+            for j in range(w):
+                patch = compressed_data[patch_idx]
+                h_patch_size, w_patch_size = patch_size, patch_size
 
-    def img_enhance(self, img: np.ndarray):
-        try:
-            output, _ = self.img_enchanced_model.enhance(img, outscale=1)
-            return output
-        except Exception as e:
-            print(f"Img enhance failed: {e}")
-            return img
-        
+                if (i + 1) * patch_size > self.height:
+                    h_patch_size = self.height - i * patch_size
+                if (j + 1) * patch_size > self.width:
+                    w_patch_size = self.width - j * patch_size
+                upsampled_patch = cv2.resize(patch, 
+                                             (w_patch_size, h_patch_size), 
+                                             interpolation=cv2.INTER_LINEAR)
+
+                # 3. 将 patch 填入对应位置
+                y1, y2 = i * patch_size, (i + 1) * patch_size
+                y2 = min(y2, self.height)  # 确保不超过边界
+                x1, x2 = j * patch_size, (j + 1) * patch_size
+                x2 = min(x2, self.width)  # 确保不超过边界
+                reconstructed_img[y1:y2, x1:x2, :] = upsampled_patch
+                
+                patch_idx += 1
+
+        return reconstructed_img
+
+
 class System2:
     def __init__(self, model_settings: ModelCfg):
         from internnav.model.basemodel.internvla_n1.internvla_n1 import InternVLAN1ForCausalLM
