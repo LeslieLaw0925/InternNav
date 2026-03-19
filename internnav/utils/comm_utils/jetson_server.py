@@ -4,6 +4,7 @@ import multiprocessing
 import pickle
 from typing import Any, Dict, List
 from time import time
+import os
 
 import uvicorn
 from fastapi import APIRouter, FastAPI, HTTPException, status
@@ -15,7 +16,7 @@ from internnav.configs.agent import InitRequest, ResetRequest, StepRequest
 from internnav.configs.agent import NewAgentCfg
 from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
-from .visual_encoder import VisionEncoder, numpy_compression_v2
+from .visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image
 from .client_utils import serialize_obs, remove_from_obs
 
 
@@ -45,6 +46,7 @@ class AgentServer:
         self.compressed_ratios = np.arange(0.1, 1.0, 0.1)
         self.transmission_delay_threshold = 0.3  # Set a threshold for transmission delay (in seconds)
         self.if_compressed = False
+        os.makedirs("logs/test_data", exist_ok=True)
 
     def _register_routes(self):
         route_config = [
@@ -88,7 +90,11 @@ class AgentServer:
         obs[0] = remove_from_obs(obs[0])
         obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         orgin_rgb = obs[0]['rgb']
-        # draw_heatmap_on_image(orgin_rgb, self.vision_encoder.get_patch_importance(orgin_rgb))
+
+        # vit_start_time = time()
+        # important_map = self.vision_encoder.get_patch_importance(orgin_rgb)
+        # log.info(f"[TIME] On-device ViT infer time: {time() - vit_start_time:.2f}s.")
+        # draw_heatmap_on_image(orgin_rgb, important_map)
 
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes

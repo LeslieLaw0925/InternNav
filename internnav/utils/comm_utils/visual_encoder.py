@@ -69,7 +69,7 @@ class VisionEncoder:
         self.vit_model = Qwen2_5_VisionTransformerPretrainedModel._from_config(vision_config, 
                                                                                attn_implementation="flash_attention_2")
         self.vit_model.load_state_dict(torch.load(vit_path, map_location="cpu"), strict=True)
-        self.vit_model.to(device=self.device, dtype=torch.bfloat16)
+        self.vit_model.to(device=self.device, dtype=torch.float16)
 
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
         self.processor = AutoProcessor.from_pretrained(model_dir)

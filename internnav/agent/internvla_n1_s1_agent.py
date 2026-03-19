@@ -21,7 +21,7 @@ class System1:
         set_random_seed(0)
         vln_sensor_config = config.model_settings
         self.device = "cuda"
-        self.dtype = torch.bfloat16
+        self.dtype = torch.float16
         self.config = dict(system1=vln_sensor_config.get('s1_type'),
                            navdp_pretrained=vln_sensor_config.get('navdp_pretrained'),
                            nextdit_pretrained=vln_sensor_config.get('nextdit_pretrained')

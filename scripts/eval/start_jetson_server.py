@@ -1,5 +1,14 @@
 #!/usr/bin/env python
 import sys
+import os
+# nvidia_lib_path = "/usr/lib/aarch64-linux-gnu/nvidia"
+# os.environ["LIBRARY_PATH"] = f"{nvidia_lib_path}:" + os.environ.get("LIBRARY_PATH", "")
+# os.environ["LD_LIBRARY_PATH"] = f"{nvidia_lib_path}:" + os.environ.get("LD_LIBRARY_PATH", "")
+# os.environ['CUDA_HOME'] = "/usr/local/cuda-12.6:/usr/local/cuda"
+# os.environ["PATH"] = "/usr/local/cuda-12.6/bin:/usr/local/cuda/bin:" + os.environ.get("PATH", "")
+# os.environ["CC"] = "/usr/bin/gcc"
+# os.environ["CXX"] = "/usr/bin/g++"
+os.environ["TRITON_PTXAS_PATH"]="/usr/local/cuda-12.6/bin/ptxas"
 
 sys.path.append('.')
 sys.path.append('./third_party/diffusion-policy')
@@ -10,7 +19,7 @@ import importlib.util
 import sys
 
 # Import for agent registry side effects — do not remove
-from internnav.agent import Agent  # noqa: F401
+# from internnav.agent import Agent  # noqa: F401
 from internnav.utils import AgentServer
 from internnav.utils import common_log_util
 
