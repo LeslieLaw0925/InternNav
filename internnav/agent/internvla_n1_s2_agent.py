@@ -39,6 +39,7 @@ class CloudAgent(Agent):
         self.episode_idx: int = 0
         self.output_pixel = None
         self.traj_latents = None
+        self.if_first_step = True  # Only used for the first step to determine whether to return text_embeddings.
 
         # vis debug
         self.vis_debug = vln_sensor_config['vis_debug']
@@ -53,6 +54,7 @@ class CloudAgent(Agent):
         self.last_action = -1
         self.look_down = False
         self.output_pixel = None
+        self.if_first_step = True
         self.s2_agent.reset(reset_index)
         
         '''reset_index: [0]'''
@@ -73,10 +75,7 @@ class CloudAgent(Agent):
 
         obs = obs[0]  # do not support batch_env currently?
         is_compressed = obs.get('compressed', 0)
-        if is_compressed:
-            rgb = self.restore_img(obs['rgb'])
-        else:
-            rgb = obs['rgb']
+        rgb = self.restore_img(obs['rgb']) if is_compressed else obs['rgb']
         
         depth = obs.get('depth', None)
         instruction = obs['instruction']
@@ -84,9 +83,10 @@ class CloudAgent(Agent):
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
         traj_latents = None
 
-        if current_stage == "s1":
+        if current_stage != "s2":
             self.s2_agent.step_no_infer(rgb, depth, pose)
-            output = {'action': [-1]}
+            self.action_seq = []
+            self.last_action = -1
         else:
             if self.last_action == 5:
                 # 此时S2找到了pixel goal，获取pixel goal的rgb，depth，以及traj_latent
@@ -103,13 +103,14 @@ class CloudAgent(Agent):
                     self.s2_agent.step_no_infer(rgb, depth, pose)
                 self.last_action = self.action_seq.pop(0)
 
-            output = {'action': [self.last_action]}
+        output = {'action': [self.last_action]}
 
         # Visualization
         if self.vis_debug:
             vis = rgb.copy()
             if 'action' in output:
-                vis = cv2.putText(vis, str(output['action'][0]), (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                text = f"{str(output['action'][0])} {current_stage}"
+                vis = cv2.putText(vis, text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             if self.output_pixel is not None:
                 pixel = self.output_pixel
                 vis = cv2.putText(
@@ -127,9 +128,18 @@ class CloudAgent(Agent):
 
             self.fps_writer.append_data(vis)
 
+        text_embedding = None
+        if self.if_first_step:
+            input_ids = self.s2_agent.tokenizer(instruction, return_tensors="pt").input_ids.to(self.device)
+            with torch.no_grad():
+                text_embedding = self.s2_agent.model.model.embed_tokens(input_ids)
+            text_embedding = text_embedding.detach().cpu().to(dtype=torch.float32).numpy().tolist()
+            self.if_first_step = False
+
         return [{'action': output['action'],
                  'ideal_flag': True, 
                  'traj_latents': traj_latents,
+                 'text_embedding': text_embedding,
                  'processing_time': time.time() - infer_start_time}]
     
     def restore_img(self, compressed_data, patch_size=28):
@@ -200,7 +210,6 @@ class System2:
         self.rgb_list = []
         self.depth_list = []
         self.pose_list = []
-        self.episode_idx = 0
         self.conversation_history = []
         self.llm_output = ""
         self.past_key_values = None
@@ -217,6 +226,7 @@ class System2:
         self.episode_idx = 0  # S2's episode idx is different from the system's idx
         self.conversation_history = []  # Multi-turn conversation exists when looking down
         self.llm_output = ""
+        self.text_embeddings = None  # Only set at the first step, not updated in the following steps.
 
     def init_prompts(self):
         self.DEFAULT_IMAGE_TOKEN = "<image>"
