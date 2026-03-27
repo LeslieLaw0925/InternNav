@@ -19,6 +19,7 @@ from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
 from .visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image
 from .client_utils import serialize_obs, remove_from_obs
+from .complexity_analyze_process import ComplexityAnalyzer
 
 
 class AgentServer:
@@ -38,7 +39,7 @@ class AgentServer:
         self.base_url = f'http://{config.cloud_server_host}:{config.cloud_server_port}'
         self.s1_agent = System1(config)
         self.device = "cuda"
-        self.vision_encoder = VisionEncoder()
+        self.complexity_analyzer = ComplexityAnalyzer(device=self.device)
 
         self.ema_bandwidth = None
         self.current_stage = 's2'
@@ -87,32 +88,37 @@ class AgentServer:
         obs = transfer(request.observation)
         return self.preprocess_obs(obs)
 
-    def preprocess_obs(self, obs: List[Dict[str, Any]]):
-        obs[0] = remove_from_obs(obs[0])
-        obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
-        orgin_rgb = obs[0]['rgb']
+    def switch_stage(self, rgb: np.array):
+        start_time = time()
+        is_complex, score = self.complexity_analyzer.should_trigger(rgb)
+        log.info(f"Complexity score is {score}.")
+        log.info(f"[TIME] Complexity predictor time is {time() - start_time:.2f}s.")
+        force_s2 = is_complex or (self.forward_step_num > self.PLAN_STEP_GAP)
 
+        # force_s2 = (self.forward_step_num > self.PLAN_STEP_GAP and len(self.s1_agent.action_list) == 0)
+        stage = 's2' if force_s2 else 's1'
+        return stage
+    
+    def _request_s2(self, obs: List[Dict[str, Any]]):
+        response_data = self._transmit_obs(obs)
+        cloud_data: dict = response_data['action'][0]
+
+        traj_latents = cloud_data.get('traj_latents', None)  # obtain traj_latents for System1
+        if traj_latents is not None:
+            traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device)
+            self.s1_agent.record_goal_obs(obs[0], traj_latents)
+            s1_response_data = self.s1_agent.step(obs[0])
+
+            self.forward_step_num += 1
+            self.current_stage = 's1'
+            return s1_response_data
+        
+        return response_data
+    
+    def _transmit_obs(self, obs: List[Dict[str, Any]]):
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
         log.info(f"Original observation size: {upload_data_size / 1024:.2f} KB")
-
-        # vit_start_time = time()
-        # patch_embedding, _ = self.vision_encoder.get_patch_importance(orgin_rgb) # patch_embedding: (1564, 1280)
-        # log.info(f"[TIME] On-device ViT infer time: {time() - vit_start_time:.2f}s.")
-
-        # estimated_transmission_delay = self.estimate_transmission_time(upload_data_size)
-        # if estimated_transmission_delay is not None and estimated_transmission_delay > self.transmission_delay_threshold:
-        # log.info(f"[TIME] Estimated transmission time: {estimated_transmission_delay:.4f}s")
-        if self.if_compressed:
-            preprocess_start_time = time()
-            obs[0]['rgb'] = numpy_compression_v2(orgin_rgb, compression_factor=2)
-            obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
-            serialized_obs = serialize_obs(obs)
-            compressed_size = len(serialized_obs)  # in bytes
-            log.info(f"Compressed observation size: {compressed_size / 1024:.2f} KB")
-            log.info(f"Transmission size reduction ratio: {(upload_data_size - compressed_size) / upload_data_size * 100:.4f}%")
-            preprocess_end_time = time()
-            log.info(f"[TIME] Image compression time: {preprocess_end_time - preprocess_start_time:.4f}s")
 
         transmission_start_time = time()
         request_data = StepRequest(observation=serialized_obs).model_dump(mode='json')
@@ -126,41 +132,29 @@ class AgentServer:
 
         response_data = response.json()
         transmission_end_time = time()
-
-        cloud_data: dict = response_data['action'][0]
         cloud_inference_latency = response_data['action'][0].pop('processing_time')
         cloud_response_latency = transmission_end_time - transmission_start_time
         transmission_latency = cloud_response_latency - cloud_inference_latency
 
         log.info(f"[TIME] Cloud inference time: {cloud_inference_latency:.4f}s")
         log.info(f"[TIME] Actual transmission time: {transmission_latency:.4f}s")
+        return response_data
+    
+    def preprocess_obs(self, obs: List[Dict[str, Any]]):
+        obs[0] = remove_from_obs(obs[0])
+        orgin_rgb = obs[0]['rgb']
 
-        # self.update_bandwidth(compressed_size, transmission_latency)
+        if self.current_stage == 's1':
+            self.current_stage = self.switch_stage(orgin_rgb)
 
+        obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         if self.current_stage == 's2':
-            traj_latents = cloud_data.get('traj_latents', None)  # obtain traj_latents for System1
-            if traj_latents is not None:
-                traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device)
-                # draw_heatmap_on_image(orgin_rgb, important_map, suffix='_goal')
-                obs[0]['rgb'] = orgin_rgb  # Use original RGB for System1 processing
-                self.s1_agent.record_goal_obs(obs[0], traj_latents)
-                s1_response_data = self.s1_agent.step(obs[0])
-
-                self.forward_step_num += 1
-                self.current_stage = 's1'
-                return s1_response_data
-            else:
-                # draw_heatmap_on_image(orgin_rgb, important_map)
-                response_data['action'][0].pop('traj_latents', None)  # Remove traj_latents if not present
-                return response_data
+            self.forward_step_num = 0
+            return self._request_s2(obs)
         else:
-            obs[0]['rgb'] = orgin_rgb
+            self._transmit_obs(obs) # transmit the continuous observations to the server
             s1_response_data = self.s1_agent.step(obs[0])
             self.forward_step_num += 1
-
-            if self.forward_step_num > self.PLAN_STEP_GAP and len(self.s1_agent.action_list) == 0:
-                self.current_stage = 's2'
-                self.forward_step_num = 0
             return s1_response_data
 
     async def reset_agent(self, agent_name: str, request: ResetRequest):
@@ -175,6 +169,7 @@ class AgentServer:
 
         reset_index = getattr(request, 'reset_index', None)
         self.s1_agent.reset(reset_index)
+        self.complexity_analyzer.reset()
 
         self.current_stage = 's2'  # Reset to initial stage after reset
         self.forward_step_num = 0

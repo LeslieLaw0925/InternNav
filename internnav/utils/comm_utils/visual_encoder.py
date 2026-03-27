@@ -76,8 +76,8 @@ class VisionEncoder:
         self.processor.tokenizer = tokenizer
         self.processor.tokenizer.padding_side = 'left'
 
-    def get_patch_importance(self, image: np.ndarray):
-        text = self.processor.apply_chat_template([""], tokenize=False, add_generation_prompt=True)
+    def get_patch_importance(self, image: np.ndarray, text=""):
+        text = self.processor.apply_chat_template([text], tokenize=False, add_generation_prompt=True)
         image = Image.fromarray(image)
         inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
 
@@ -87,18 +87,18 @@ class VisionEncoder:
 
         with torch.no_grad():
             merger_outputs, outputs = self.vit_model(pixel_values, image_grid_thw)
-        merger_scale = math.sqrt(outputs.shape[0] / merger_outputs.shape[0])
+        merge_scale = math.sqrt(outputs.shape[0] / merger_outputs.shape[0])
 
-        h_grid, w_grid = int(h_grid / merger_scale), int(w_grid / merger_scale)
+        h_grid, w_grid = int(h_grid / merge_scale), int(w_grid / merge_scale)
         patch_importance = torch.norm(merger_outputs, dim=-1)
         patch_importance = patch_importance / patch_importance.max() # 归一化到0-1
         patch_importance = patch_importance.reshape(h_grid, w_grid)
         patch_importance = patch_importance.cpu().to(dtype=torch.float32).numpy()
 
-        return patch_importance
+        return outputs, patch_importance
 
 
-def draw_heatmap_on_image(image, importance_map):
+def draw_heatmap_on_image(image, importance_map, suffix=''):
     # importance_map: (h_grid, w_grid)，值在0-1之间
     # h_grid, w_grid = importance_map.shape
     h_img, w_img, _ = image.shape
@@ -113,7 +113,7 @@ def draw_heatmap_on_image(image, importance_map):
     alpha = 0.5
     overlayed_image = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
 
-    cv2.imwrite(f'logs/test_data/heatmap_overlay_{time.time()}.jpg', overlayed_image)  # 保存叠加后的图像以供对比
+    cv2.imwrite(f'logs/test_data/heatmap_overlay_{time.time()}{suffix}.jpg', overlayed_image)  # 保存叠加后的图像以供对比
 
 
 def generate_mask(shape, zero_ratio=0.01):
@@ -136,7 +136,7 @@ def generate_mask(shape, zero_ratio=0.01):
     return arr.reshape(shape)
 
 
-def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=4):
+def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=2):
     """
     image: (H, W, C) 的 numpy 数组
     patch_size: 每个 patch 的大小，例如 14
@@ -164,7 +164,7 @@ def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=4):
     return compressed_data
 
 
-def numpy_compression(image, importance, keep_ratio=0.01):
+def numpy_compression(image, importance, keep_ratio=0.2, compression_factor=4):
     """
     image_np: (C, H, W) 的 numpy 数组
     attn_map: (h, w) 的注意力热力图，与 patch 数量对应
@@ -173,28 +173,21 @@ def numpy_compression(image, importance, keep_ratio=0.01):
 
     # cv2.imwrite('original_image.jpg', image)  # 保存原始图像以供对比
     H, W, _ = image.shape
-    patch_size = 100 # H // importance.shape[0] # 28
+    patch_size = H // importance.shape[0] # 28
 
     threshold = np.percentile(importance, (1 - keep_ratio) * 100)  # 根据百分位数动态确定阈值
     
     # 1. 标识低兴趣区域 (Low Interest Mask)
-    # mask = (importance < threshold)
-    # import pdb; pdb.set_trace()
-    # mask = np.random
-    # mask = generate_mask(importance.shape, zero_ratio=0.01)
-    new_H, new_W = H // patch_size + 1, W // patch_size + 1
-    # mask = generate_mask((new_H, new_W), zero_ratio=0.01)
+    mask = (importance < threshold)
     
     # 2. 分离数据：我们将图像切分为 Patch 列表
     # 重要区域保留原始 patch，不重要区域进行池化
     compressed_data = []
     metadata = [] # 记录位置信息用于还原
     
-    idx = 0
-    # for i in range(importance.shape[0]):
-    #     for j in range(importance.shape[1]):
-    for i in range(new_H):
-        for j in range(new_W):
+    # idx = 0
+    for i in range(importance.shape[0]):
+        for j in range(importance.shape[1]):
             # 获取当前 patch 的像素范围
             y1, y2 = i * patch_size, (i + 1) * patch_size
             x1, x2 = j * patch_size, (j + 1) * patch_size
@@ -202,48 +195,18 @@ def numpy_compression(image, importance, keep_ratio=0.01):
             x2 = min(x2, W)
             patch = image[y1:y2, x1:x2, :]
             
-            # if mask[i, j]:
-            #     # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
-            #     compressed_patch = cv2.resize(patch, (patch_size//4, patch_size//4), 
-            #                                   interpolation=cv2.INTER_AREA)
-            #     compressed_data.append(compressed_patch)
-            #     metadata.append(0) # 标记为压缩
-            # else:
-            #     compressed_data.append(patch)
-            #     metadata.append(1) # 标记为原始
-
-            compressed_patch = cv2.resize(patch, (patch_size//8, patch_size//8), 
+            if mask[i, j]:
+                # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
+                compressed_patch = cv2.resize(patch, 
+                                              (patch_size//compression_factor, patch_size//compression_factor), 
                                               interpolation=cv2.INTER_AREA)
-            compressed_data.append(compressed_patch)
+                compressed_data.append(compressed_patch)
+                metadata.append(0) # 标记为压缩
+            else:
+                compressed_data.append(patch)
+                metadata.append(1) # 标记为原始
     
     return compressed_data, metadata
-
-
-def adaptive_compression_v2(image, patch_importance, threshold=0.1):
-    """
-    通过对非重要区域进行强模糊来减小文件体积，同时 100% 保留重要区域
-    """
-    h, w, c = image.shape
-    
-    # 1. 将 Patch Importance 转换为二值掩码 (0 或 1)
-    # 只有重要性大于阈值的 patch 才设为 1
-    threshold = np.percentile(patch_importance, (1 - threshold) * 100)  # 根据百分位数动态确定阈值
-    binary_patch_mask = (patch_importance >= threshold).astype(np.float32)
-    
-    # 2. 将掩码放大到原图尺寸
-    # 使用 cv2.INTER_NEAREST 保证 Patch 边缘清晰，不产生中间值
-    mask = cv2.resize(binary_patch_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    mask = np.stack([mask] * 3, axis=-1)
-    
-    # 3. 对全图进行强力模糊（这是压缩体积的关键）
-    # 模糊程度越高，非重要区域的熵越低，压缩后的 buffer 越小
-    low_quality_area = cv2.GaussianBlur(image, (51, 51), 4)
-    
-    # 4. 硬合成：重要区域 100% 像素保留，非重要区域 100% 模糊
-    # final = 原图(重要部分) + 模糊图(非重要部分)
-    final_img = (image * mask + low_quality_area * (1 - mask)).astype(np.uint8)
-    
-    return final_img
 
 
 def compress_image_by_patch(image, patch_importance, 

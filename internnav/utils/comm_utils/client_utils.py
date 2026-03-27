@@ -5,6 +5,7 @@ import pickle
 
 import torchvision.models as models
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 from transformers import CLIPVisionModel, CLIPImageProcessor
 from torchvision.transforms import v2

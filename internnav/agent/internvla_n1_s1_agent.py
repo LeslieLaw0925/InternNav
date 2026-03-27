@@ -46,10 +46,10 @@ class System1:
         self.traj_latents = None # record the corresponding traj_latents when S2 finds the pixel goal
         self.ready_to_reach_goal = False
 
-    def record_goal_obs(self, obs, traj_latents):
+    def record_goal_obs(self, obs, traj_latents: torch.tensor):
         self.pixel_goal_rgb = obs.get('rgb')
         self.pixel_goal_depth = obs.get('depth', None)
-        self.traj_latents = traj_latents
+        self.traj_latents = traj_latents.to(self.dtype)
 
     def step(self, obs: dict) -> dict[str, list]:
         if len(self.action_list) > 0:
@@ -88,10 +88,8 @@ class System1:
         else:
             depths = None
 
-        traj_latents = torch.from_numpy(np.array(self.traj_latents)).\
-            to(self.device, self.dtype)
         with torch.no_grad():
-            dp_actions = self.step_s1(traj_latents, rgbs, depths_dp=depths)
+            dp_actions = self.step_s1(self.traj_latents, rgbs, depths_dp=depths)
         log.info(f'[TIME] On-device system1 step time: {time.time() - start_time:.2f} s')
             
         action_list = traj_to_actions(dp_actions)
