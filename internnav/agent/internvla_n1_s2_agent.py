@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer
+import torch.nn.functional as F
 
 from internnav.agent.base import Agent
 from internnav.configs.agent import AgentCfg
@@ -75,13 +76,16 @@ class CloudAgent(Agent):
 
         obs = obs[0]  # do not support batch_env currently?
         is_compressed = obs.get('compressed', 0)
-        rgb = self.restore_img(obs['rgb']) if is_compressed else obs['rgb']
+        rgb = self.restore_img_by_patch(obs['rgb']) if is_compressed else obs['rgb']
+        # if is_compressed:
+        #     rgb = cv2.resize(obs['rgb'], (self.width, self.height), interpolation=cv2.INTER_LINEAR)
         
         depth = obs.get('depth', None)
         instruction = obs['instruction']
+
         current_stage = obs['stage']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-        traj_latents = None
+        traj_latents, pixel, confidence_metrics = None, None, None
 
         if current_stage != "s2":
             self.s2_agent.step_no_infer(rgb, depth, pose)
@@ -90,14 +94,14 @@ class CloudAgent(Agent):
         else:
             if self.last_action == 5:
                 # 此时S2找到了pixel goal，获取pixel goal的rgb，depth，以及traj_latent
-                _, traj_latents, self.output_pixel = \
+                _, traj_latents, self.output_pixel, confidence_metrics = \
                     self.s2_agent.step(rgb, depth, pose, instruction, look_down=True)
                 traj_latents = traj_latents.detach().cpu().to(dtype=torch.float32).numpy().tolist()
                 self.action_seq = []
                 self.last_action = -1
             else:
                 if self.action_seq == []:
-                    self.action_seq, _, _ = \
+                    self.action_seq, _, _, confidence_metrics = \
                         self.s2_agent.step(rgb, depth, pose, instruction, look_down=False)
                 else:
                     self.s2_agent.step_no_infer(rgb, depth, pose)
@@ -112,7 +116,7 @@ class CloudAgent(Agent):
                 text = f"{str(output['action'][0])} {current_stage}"
                 vis = cv2.putText(vis, text, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             if self.output_pixel is not None:
-                pixel = self.output_pixel
+                pixel = self.output_pixel.tolist()
                 vis = cv2.putText(
                     vis,
                     f"{pixel[1]}, {pixel[0]}",
@@ -122,24 +126,36 @@ class CloudAgent(Agent):
                     (0, 255, 0),
                     2,
                 )
-
                 cv2.circle(vis, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
                 self.output_pixel = None
+            if confidence_metrics is not None:
+                idx = 1
+                for k, v in confidence_metrics.items():
+                    vis = cv2.putText(
+                        vis,
+                        f"{k}: {v}",
+                        (10, 100 + idx * 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 255, 0),
+                        2,
+                    )
+                    idx += 1
 
             self.fps_writer.append_data(vis)
 
-        text_embedding = None
-        if self.if_first_step:
-            input_ids = self.s2_agent.tokenizer(instruction, return_tensors="pt").input_ids.to(self.device)
-            with torch.no_grad():
-                text_embedding = self.s2_agent.model.model.embed_tokens(input_ids)
-            text_embedding = text_embedding.detach().cpu().to(dtype=torch.float32).numpy().tolist()
-            self.if_first_step = False
+        # text_embedding = None
+        # if self.if_first_step:
+        #     input_ids = self.s2_agent.tokenizer(instruction, return_tensors="pt").input_ids.to(self.device)
+        #     with torch.no_grad():
+        #         text_embedding = self.s2_agent.model.model.embed_tokens(input_ids)
+        #     text_embedding = text_embedding.detach().cpu().to(dtype=torch.float32).numpy().tolist()
+        #     self.if_first_step = False
 
         return [{'action': output['action'],
                  'ideal_flag': True, 
                  'traj_latents': traj_latents,
-                 'text_embedding': text_embedding,
+                 'pixel_goal': pixel,
                  'processing_time': time.time() - infer_start_time}]
     
     def restore_img(self, compressed_data, patch_size=28):
@@ -179,6 +195,40 @@ class CloudAgent(Agent):
 
         return reconstructed_img
 
+    def restore_img_by_patch(self, compressed_data, patch_size=28):
+        compressed_data_patch, metadata = compressed_data
+        h, w = self.height // patch_size, self.width // patch_size + 1 # 17， 23
+
+        # 1. 创建一个空白画布
+        reconstructed_img = np.zeros((self.height, self.width, 3), dtype=compressed_data_patch[0].dtype)
+        
+        patch_idx = 0
+        for i in range(h):
+            for j in range(w):
+                h_patch_size, w_patch_size = patch_size, patch_size             
+                if (i + 1) * patch_size > self.height:
+                    h_patch_size = self.height - i * patch_size
+                if (j + 1) * patch_size > self.width:
+                    w_patch_size = self.width - j * patch_size
+                
+                patch = compressed_data_patch[patch_idx]
+                if metadata[patch_idx] == 0:
+                    patch = cv2.resize(patch, 
+                                       (w_patch_size, h_patch_size), 
+                                       interpolation=cv2.INTER_LINEAR)
+             
+                # 3. 将 patch 填入对应位置
+                y1, y2 = i * patch_size, (i + 1) * patch_size
+                x1, x2 = j * patch_size, (j + 1) * patch_size
+                y2 = min(y2, self.height)  # 确保不超过边界
+                x2 = min(x2, self.width)  # 确保不超过边界
+
+                reconstructed_img[y1:y2, x1:x2, :] = patch
+            
+                patch_idx += 1
+
+        return reconstructed_img
+    
 
 class System2:
     def __init__(self, model_settings: ModelCfg):
@@ -339,30 +389,84 @@ class System2:
 
         # 3. Model inference
         with torch.no_grad():
-            output_ids = self.model.generate(
+            outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=128,
                 do_sample=False,
                 use_cache=True,
                 past_key_values=None,
                 return_dict_in_generate=True,
-            ).sequences
+                output_scores=True,
+            )
+        output_ids = outputs.sequences
         self.llm_output = self.processor.tokenizer.decode(
             output_ids[0][inputs.input_ids.shape[1] :], skip_special_tokens=True
         )
         print(f"============ output {self.episode_idx}  {self.llm_output}")
+        confidence_metrics = None
+        if self.llm_output.strip() == "↓":
+            confidence_metrics = self.evaluate_sequence_confidence(outputs, inputs.input_ids.shape[1])
 
         # 4. Post-process results
         if bool(re.search(r'\d', self.llm_output)):  # Output pixel goal
             coord = [int(c) for c in re.findall(r'\d+', self.llm_output)]
             pixel_goal = [int(coord[1]), int(coord[0])]
             output_pixel = np.array(pixel_goal)
+            confidence_metrics = self.evaluate_sequence_confidence(outputs, inputs.input_ids.shape[1])
 
             image_grid_thw = torch.cat([thw.unsqueeze(0) for thw in inputs.image_grid_thw], dim=0)
             with torch.no_grad():
                 traj_latents = self.model.generate_latents(output_ids, inputs.pixel_values, image_grid_thw)
-            return None, traj_latents, output_pixel
+            return None, traj_latents, output_pixel, confidence_metrics
 
         else:  # Output action
             action_seq = self.parse_actions(self.llm_output)
-            return action_seq, None, None
+            return action_seq, None, None, confidence_metrics
+        
+    def evaluate_sequence_confidence(self, outputs, input_len):
+        """
+        不筛选关键词，评估整个生成序列的置信度指标
+        """
+        # outputs.scores 包含了生成的每个 token 的 logits
+        # 形状为: (gen_len, batch_size, vocab_size)
+        gen_logits = outputs.scores 
+        gen_ids = outputs.sequences[0][input_len:]
+        
+        probs_list = []
+        margins_list = []
+
+        # import pdb; pdb.set_trace()
+        for i, token_id in enumerate(gen_ids):
+            # 1. 转化为概率分布
+            # Qwen2.5-VL 可能会输出非常大的 Logits，Softmax 转换是必须的
+            logits = gen_logits[i][0] 
+            probs = F.softmax(logits, dim=-1)
+            
+            # 2. 获取当前被选中的 Token 的概率
+            conf = probs[token_id].item()
+            probs_list.append(conf)
+            
+            # 3. 计算 Margin (第一名和第二名概率之差)
+            # 如果 Margin 极小，说明模型在两个 Token 之间极度犹豫
+            top2_values = torch.topk(probs, 2).values
+            margin = top2_values[0].item() - top2_values[1].item()
+            margins_list.append(margin)
+
+        if not probs_list:
+            return 1.0, 1.0 # 如果没有生成内容，默认置信度高
+
+        # 指标 1: 算术平均概率 (反映整体稳定性)
+        avg_conf = sum(probs_list) / len(probs_list)
+        
+        # 指标 2: 序列最小概率 (核心指标：捕捉最弱的一环)
+        min_conf = min(probs_list)
+        
+        # 指标 3: 平均 Margin
+        avg_margin = sum(margins_list) / len(margins_list)
+
+        return {
+            "avg_conf": round(avg_conf, 4),
+            "min_conf": round(min_conf, 4),
+            "avg_margin": round(avg_margin, 4),
+            # "raw_probs": probs_list
+        }

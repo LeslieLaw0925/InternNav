@@ -118,7 +118,7 @@ class System1:
         predict_step_nums=32,
         guidance_scale: float = 1.0,
         num_inference_steps: int = 10,
-        num_sample_trajs: int = 8,
+        num_sample_trajs: int = 32,
     ):
         if 'nextdit' in self.config['system1']:
             scheduler = FlowMatchEulerDiscreteScheduler()
