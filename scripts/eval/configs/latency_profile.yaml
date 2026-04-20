@@ -1,0 +1,14 @@
+s2_infer:
+  max_inference_time: 0.0026 # seconds, based on the observed inference time of the current S2 model on 5090 GPU
+  min_inference_time: 0.6316 # seconds, based on the observed inference time of the current S2 model on 5090 GPU
+
+# On-device inference latency
+s1_infer:
+  nextdit:
+    alpha: 0.089352 
+    beta: 0.000993
+    c: 0.206414
+  navdp:
+    alpha: 0.040813
+    beta: 0.000470
+    c: 0.304793

@@ -129,9 +129,11 @@ def traj_to_actions(dp_actions, use_discrate_action=True):
     dp_actions[:, :, :2] /= 4.0
     all_trajectory = reconstruct_xy_from_delta(dp_actions.float().cpu().numpy())
     trajectory = np.mean(all_trajectory, axis=0)
+    traj_variance = np.var(all_trajectory[:, :, :2], axis=0).sum().item()
+
     if use_discrate_action:
         actions = trajectory_to_discrete_actions_close_to_goal(trajectory)
-        return actions
+        return actions, traj_variance
     else:
         return trajectory
 

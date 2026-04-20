@@ -116,7 +116,8 @@ class DAT_RGBD_Patch_Backbone(nn.Module):
         self.memory_size = memory_size
         self.image_size = image_size
         self.embed_size = embed_size
-        self.input_dtype = torch.bfloat16 if input_dtype == "bf16" else torch.float32
+        # self.input_dtype = torch.bfloat16 if input_dtype == "bf16" else torch.float32
+        self.input_dtype = torch.float16
         self.version = version
 
         model_configs = {'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]}}
