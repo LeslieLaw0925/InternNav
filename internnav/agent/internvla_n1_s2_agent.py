@@ -24,6 +24,57 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 TROCH_DTYPE = torch.bfloat16
 
 
+def restore_img_by_patch(compressed_data_patch, patch_size=28):
+    height, width = 480, 640
+    h, w = height // patch_size + 1, width // patch_size + 1 # 17， 23
+
+    # 1. 创建一个空白画布
+    reconstructed_img = np.zeros((height, width, 3), dtype=compressed_data_patch[0].dtype)
+    
+    patch_idx = 0
+    for i in range(h):
+        for j in range(w):
+            h_patch_size, w_patch_size = patch_size, patch_size             
+            if (i + 1) * patch_size > height:
+                h_patch_size = height - i * patch_size
+            if (j + 1) * patch_size > width:
+                w_patch_size = width - j * patch_size
+            
+            patch = compressed_data_patch[patch_idx]
+            patch = cv2.resize(patch, 
+                                (w_patch_size, h_patch_size), 
+                                interpolation=cv2.INTER_LINEAR)
+            
+            # 3. 将 patch 填入对应位置
+            y1, y2 = i * patch_size, (i + 1) * patch_size
+            x1, x2 = j * patch_size, (j + 1) * patch_size
+            y2 = min(y2, height)  # 确保不超过边界
+            x2 = min(x2, width)  # 确保不超过边界
+
+            reconstructed_img[y1:y2, x1:x2, :] = patch
+        
+            patch_idx += 1
+
+    return reconstructed_img
+
+
+def draw_pixel_goal_on_image(image, pixel, idx=0):
+    pixel = pixel.tolist()
+    vis = image.copy()
+
+    vis = cv2.putText(
+        vis,
+        f"{pixel[1]}, {pixel[0]}",
+        (50, 100),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1,
+        (0, 255, 0),
+        2,
+    )
+    cv2.circle(vis, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
+    cv2.imwrite(f"logs/test_data/pixel_goal_{idx}.png", vis)
+
+
 @Agent.register('internvla_n1_cloud')
 class CloudAgent(Agent):
     def __init__(self, config: AgentCfg):
@@ -41,6 +92,9 @@ class CloudAgent(Agent):
         self.output_pixel = None
         self.traj_latents = None
         self.if_first_step = True  # Only used for the first step to determine whether to return text_embeddings.
+
+        os.makedirs(f"logs/test_data", exist_ok=True)
+        self.img_idx = 0
 
         # vis debug
         self.vis_debug = vln_sensor_config['vis_debug']
@@ -109,6 +163,14 @@ class CloudAgent(Agent):
 
         output = {'action': [self.last_action]}
 
+        pixel = self.output_pixel.tolist() if self.output_pixel is not None else None
+        self.output_pixel = None
+
+        # if self.output_pixel is not None:
+        #     draw_pixel_goal_on_image(rgb, self.output_pixel, self.img_idx)
+        #     self.output_pixel = None
+        #     self.img_idx += 1
+
         # Visualization
         if self.vis_debug:
             vis = rgb.copy()
@@ -143,14 +205,6 @@ class CloudAgent(Agent):
                     idx += 1
 
             self.fps_writer.append_data(vis)
-
-        # text_embedding = None
-        # if self.if_first_step:
-        #     input_ids = self.s2_agent.tokenizer(instruction, return_tensors="pt").input_ids.to(self.device)
-        #     with torch.no_grad():
-        #         text_embedding = self.s2_agent.model.model.embed_tokens(input_ids)
-        #     text_embedding = text_embedding.detach().cpu().to(dtype=torch.float32).numpy().tolist()
-        #     self.if_first_step = False
 
         return [{'action': output['action'],
                  'ideal_flag': True, 

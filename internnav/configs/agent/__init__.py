@@ -17,7 +17,6 @@ class NewAgentCfg(BaseModel):
     local_server_port: int = 8022
     model_name: str
     ckpt_path: str = None
-    visual_encoder: str = None
     model_settings: Dict[str, Any]
 
 

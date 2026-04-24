@@ -1,45 +1,58 @@
 import re
-import matplotlib.pyplot as plt
-import numpy as np
 
-
-log_file = "log_20260402144406_3842671.log"
-
-traj_uncertainties = []
-img_uncertainties = []
-endpoint_vars = []
-
-pattern = re.compile(
-    r"Trajectory latent uncertainty: ([\d\.]+), "
-    r"Image token uncertainty: ([\d\.]+), "
-    r"Endpoint variance: ([\d\.]+)"
+# 匹配示例：
+# Cloud inference time: 123.45 ms
+# Cloud inference time = 0.56s
+PATTERN = re.compile(
+    r"Cloud inference time\s*[:=]\s*([+-]?\d+(?:\.\d+)?)\s*([a-zA-Zμµ]*)",
+    re.IGNORECASE,
 )
 
-with open(log_file, "r") as f:
-    for line in f:
-        match = pattern.search(line)
-        if match:
-            traj_uncertainties.append(float(match.group(1)))
-            img_uncertainties.append(float(match.group(2)))
-            endpoint_vars.append(float(match.group(3)))
+s1_pattern = re.compile(
+    r"On-device system1 step time\s*[:=]\s*([+-]?\d+(?:\.\d+)?)\s*([a-zA-Zμµ]*)",
+    re.IGNORECASE,
+)
 
-# traj_uncertainties, img_uncertainties, endpoint_vars = np.array(traj_uncertainties), np.array(img_uncertainties), np.array(endpoint_vars)
-print("Extracted:", len(traj_uncertainties), "entries")
+def extract_cloud_inference_times(log_path: str):
+    values, s1_times = [], []
+    with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            m = PATTERN.search(line)
+            if m:
+                num = float(m.group(1))
+                values.append(num)
 
-data = np.array([
-    traj_uncertainties,
-    img_uncertainties,
-    endpoint_vars
-])
+            m1 = s1_pattern.search(line)
+            if m1:
+                num1 = float(m1.group(1))
+                s1_times.append(num1)
 
-corr = np.corrcoef(data)
-print(corr)
+    return values, s1_times
 
 
-plt.figure()
-plt.plot(traj_uncertainties, label="traj_unc")
-# plt.plot(img_uncertainties * 10, label="img_unc")
-plt.plot(endpoint_vars, label="endpoint_var")
-plt.legend()
-plt.title("Uncertainty over time")
-plt.savefig("uncertainties.png")
+if __name__ == "__main__":
+    log_file = "nextdit_bl.log"
+    results, s1_results = extract_cloud_inference_times(log_file)
+    # print(f'On-device system1 step times: {s1_results}')
+
+    min_time = []
+    med_time = []
+    max_time = []
+
+    # 仅输出提取到的值（每行一个）
+    for v in s1_results:
+        if v < 1.3:
+            min_time.append(v)
+        elif v < 1.5:
+            med_time.append(v)
+        else:
+            max_time.append(v)
+
+    # print(f'Min inference times: {len(min_time)}')
+    # print(f'Medium inference times: {len(med_time)}')
+    # print(f'Max inference times: {len(max_time)}')
+
+    print(f'Mean time of min inference times: {sum(min_time) / len(min_time) if min_time else 0}')
+    print(f'Mean time of max inference times: {sum(max_time) / len(max_time) if max_time else 0}')
+
+    # print(f'Total number of cloud inference times extracted: {len(results)}')
