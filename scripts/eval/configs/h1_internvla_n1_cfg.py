@@ -1,5 +1,5 @@
 # from scripts.eval.configs.agent import *
-from internnav.configs.agent import AgentCfg, NewAgentCfg
+from internnav.configs.agent import NewAgentCfg
 from internnav.configs.evaluator import (
     EnvCfg,
     EvalCfg,
@@ -15,7 +15,6 @@ eval_cfg = EvalCfg(
         local_server_port=8023,
         model_name='internvla_n1_cloud',
         ckpt_path='',
-        visual_encoder='checkpoints/clip-vit-base-patch16',
         model_settings={
             'env_num': 1,
             'sim_num': 1,

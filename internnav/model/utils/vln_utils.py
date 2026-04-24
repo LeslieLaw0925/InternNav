@@ -135,7 +135,7 @@ def traj_to_actions(dp_actions, use_discrate_action=True):
         actions = trajectory_to_discrete_actions_close_to_goal(trajectory)
         return actions, traj_variance
     else:
-        return trajectory
+        return trajectory, traj_variance
 
 
 @dataclass

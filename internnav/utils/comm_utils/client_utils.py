@@ -26,7 +26,7 @@ def numpy_compression_by_patch(image, importance, keep_ratio=0.1, compression_fa
     """        
     H, W, _ = image.shape
 
-    importance = importance.detach().cpu().numpy()
+    importance = importance.detach().cpu().numpy().astype(np.float32)
     # NEW: patch importance 还原回(17, 23)，与原图对应
     importance = cv2.resize(importance, (23, 17), interpolation=cv2.INTER_LINEAR) # (17, 23)
 
@@ -114,16 +114,15 @@ def solve_optimal_patch_ratio(image, time_constraint, bandwidth_bps, compression
     time_constraint: 约束的总时延 (s)
     image: 原始图像的 NumPy 数组
     bandwidth_bps: 当前网络带宽 (Bytes/s)
-    compression_factor: 压缩倍率 (16)
+    compression_factor: 压缩倍率 (4x4, 16倍)
     """
     if bandwidth_bps is None:
         return 1.0  # 无法获取带宽信息，默认图像不做压缩
+        
+    if time_constraint <= 0:
+        return 0.1  # 时延要求太苛刻，即使压缩到极限也无法满足，给最低的patch ratio
     
     h, w, c = image.shape
-    
-    if time_constraint <= 0:
-        return 0.0  # 时延要求太苛刻，即使压缩到极限也无法满足
-    
     # 掩码数组大小 (Bytes)，每个 patch 需要 1 bit 来标记是否保留高分辨率
     mask_size = int(np.ceil((h // patch_size) * (w // patch_size) / 8))
     
@@ -138,10 +137,13 @@ def solve_optimal_patch_ratio(image, time_constraint, bandwidth_bps, compression
     
     p_star = (ratio_limit - inv_r2) / (1 - inv_r2)
     # 4. 边界裁剪
-    return min(1, max(0, p_star))
+    p_star = min(1, max(0.1, p_star))
+    return p_star
 
 
 def find_optimal_config(t_max, alpha, beta, intercept, n_range, b_range):
+    '''Find optimal config for system 1 inference'''
+
     valid_configs = []
     
     for n in n_range:
@@ -158,4 +160,7 @@ def find_optimal_config(t_max, alpha, beta, intercept, n_range, b_range):
     
     # 按照 score 排序，寻找最高效率的配置
     best_config = max(valid_configs, key=lambda x: x['score']) if valid_configs else None
+    if best_config is None:
+        best_config = {'infer_step': n_range[0], 
+                        'traj_num': b_range[0]}
     return best_config

@@ -11,14 +11,18 @@ from fastapi import APIRouter, FastAPI, HTTPException, status
 import requests
 import numpy as np
 import torch
+import yaml
 
 from internnav.agent.base import Agent
 from internnav.configs.agent import InitRequest, ResetRequest, StepRequest
 from internnav.configs.agent import NewAgentCfg
 from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
-from .visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image
-from .client_utils import serialize_obs, remove_from_obs
+from internnav.utils.comm_utils.visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image, \
+    draw_origin_image, random_compression
+from internnav.utils.comm_utils.client_utils import *
+from .spatial_variance import analyze_spatial_distribution
+from internnav.utils.comm_utils.system_log import InferenceLogger
 
 
 class AgentServer:
@@ -36,19 +40,38 @@ class AgentServer:
         self.app.include_router(self._router)
 
         self.base_url = f'http://{config.cloud_server_host}:{config.cloud_server_port}'
-        self.s1_agent = System1(config)
         self.device = "cuda"
-        self.vision_encoder = VisionEncoder()
+        self.dtype = torch.float16
+        self.inference_logger = InferenceLogger()
+
+        with open('scripts/eval/configs/latency_profile.yaml', 'r', encoding='utf-8') as f:
+            self.infer_profile_data: dict = yaml.safe_load(f)
+
+        self.s1_agent = System1(config, 
+                                self.infer_profile_data.get('s1_infer'),
+                                set_adaptive_speedup=False,
+                                infer_logger=self.inference_logger,
+                                device=self.device, dtype=self.dtype)
+        vln_sensor_config = config.model_settings
+        self.s1_type = vln_sensor_config.get('s1_type')
+        self.vision_encoder = VisionEncoder(self.s1_type, device=self.device)
+
+        self.image_compression_fachtor = 4
+        self.e2e_latency_threshold = 2.0 # seconds
+        self.cloud_latency_threshold = 1.0 # TODO: 需要合理设置这个值, seconds
+        self.s2_trigger_threshold = 6.88631
 
         self.ema_bandwidth = None
         self.current_stage = 's2'
         self.forward_step_num = 0
         self.PLAN_STEP_GAP = 8
-        self.compressed_ratios = np.arange(0.1, 1.0, 0.1)
-        self.transmission_delay_threshold = 0.3  # Set a threshold for transmission delay (in seconds)
-        self.if_compressed = False
-        os.makedirs("logs/test_data", exist_ok=True)
 
+        self.set_adaptive_compression = False
+        self.if_compressed = False
+
+        self.episode = 0
+        os.makedirs(f"logs/test_data/episode_{self.episode}", exist_ok=True)
+        
     def _register_routes(self):
         route_config = [
             ('/init', self.init_agent, ['POST'], status.HTTP_201_CREATED),
@@ -87,32 +110,86 @@ class AgentServer:
         obs = transfer(request.observation)
         return self.preprocess_obs(obs)
 
-    def preprocess_obs(self, obs: List[Dict[str, Any]]):
-        obs[0] = remove_from_obs(obs[0])
-        obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
-        orgin_rgb = obs[0]['rgb']
+    def switch_stage(self, rgb):
+        # if len(self.s1_agent.action_list) == 0:
+        #     if self.forward_step_num > self.PLAN_STEP_GAP:
+        #         force_s2 = True
+        #     else:
+        #         _, patch_importance = self.vision_encoder.get_patch_importance(rgb)
+        #         complex = analyze_spatial_distribution(patch_importance)
+        #         force_s2 = (complex > self.s2_trigger_threshold)
+        # else:
+        #     force_s2 = False
 
+        force_s2 = (self.forward_step_num > self.PLAN_STEP_GAP) and len(self.s1_agent.action_list) == 0
+
+        stage = 's2' if force_s2 else 's1'
+        return stage
+    
+    def _request_s2(self, obs: List[Dict[str, Any]], start_time: float):
+        origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
+
+        if self.set_adaptive_compression:
+            # Estimate cloud latency
+            estimated_cloud_time = self.estimate_cloud_latency(len(serialize_obs(obs)))
+            preprocess_time = time() - start_time
+            self.if_compressed = (estimated_cloud_time is not None) and \
+                ((estimated_cloud_time + preprocess_time) > self.cloud_latency_threshold)
+            log.info(f"Image compression needed: {self.if_compressed}")
+
+        response_data = self._transmit_obs(obs, start_time) # transmit the continuous observations to the server and get the response for system2
+        cloud_data: dict = response_data['action'][0]
+        traj_latents = cloud_data.get('traj_latents', None)
+
+        if traj_latents is not None:
+            traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device, self.dtype)
+
+            # _ , patch_importance = self.vision_encoder.get_patch_importance(origin_rgb)
+            # draw_heatmap_on_image(origin_rgb, patch_importance,
+            #                       pixel=cloud_data.get('pixel_goal'),
+            #                       episode=self.episode)
+            # draw_origin_image(origin_rgb, pixel=cloud_data.get('pixel_goal')) # for s1 visualization
+            
+            obs[0]['rgb'] = origin_rgb
+            obs[0]['depth'] = depth
+            self.s1_agent.record_goal_obs(obs[0], traj_latents)
+            
+            s2_elasped_time = time() - start_time
+            obs[0]['latency_constraint'] = self.e2e_latency_threshold - s2_elasped_time
+            s1_response_data = self.s1_agent.step(obs[0])
+
+            self.forward_step_num += 1
+            self.current_stage = 's1'
+            return s1_response_data
+        
+        return response_data
+    
+    def _transmit_obs(self, obs: List[Dict[str, Any]], start_time: float):
+        if self.if_compressed:
+            image = obs[0]['rgb']
+            vit_latency, patch_importance = self.vision_encoder.get_patch_importance(image)
+            log.info(f"[TIME] ViT inference latency: {vit_latency:.4f}s")
+            preprocess_time = time() - start_time
+            time_constraint = self.cloud_latency_threshold - vit_latency - preprocess_time
+            log.info(f"[CONSTRAINT] Remaining time constraint for image transmission: {time_constraint:.4f} seconds.")
+            p_star = solve_optimal_patch_ratio(image,
+                                               time_constraint,
+                                               self.ema_bandwidth,
+                                               compression_factor=self.image_compression_fachtor)
+            log.info(f"Calculated patch keep ratio (p_star): {p_star:.4f}")
+            if p_star < 1.0:
+                obs[0]['rgb'] = numpy_compression_by_patch(image, 
+                                                           patch_importance, 
+                                                           keep_ratio=p_star, 
+                                                           compression_factor=self.image_compression_fachtor)
+                obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
+            self.if_compressed = False
+
+        # obs[0]['rgb'] = numpy_compression_v2(obs[0]['rgb'], compression_factor=4)
+        # obs[0]['compressed'] = 1
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
-        log.info(f"Original observation size: {upload_data_size / 1024:.2f} KB")
-
-        # vit_start_time = time()
-        # patch_embedding, _ = self.vision_encoder.get_patch_importance(orgin_rgb) # patch_embedding: (1564, 1280)
-        # log.info(f"[TIME] On-device ViT infer time: {time() - vit_start_time:.2f}s.")
-
-        # estimated_transmission_delay = self.estimate_transmission_time(upload_data_size)
-        # if estimated_transmission_delay is not None and estimated_transmission_delay > self.transmission_delay_threshold:
-        # log.info(f"[TIME] Estimated transmission time: {estimated_transmission_delay:.4f}s")
-        if self.if_compressed:
-            preprocess_start_time = time()
-            obs[0]['rgb'] = numpy_compression_v2(orgin_rgb, compression_factor=2)
-            obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
-            serialized_obs = serialize_obs(obs)
-            compressed_size = len(serialized_obs)  # in bytes
-            log.info(f"Compressed observation size: {compressed_size / 1024:.2f} KB")
-            log.info(f"Transmission size reduction ratio: {(upload_data_size - compressed_size) / upload_data_size * 100:.4f}%")
-            preprocess_end_time = time()
-            log.info(f"[TIME] Image compression time: {preprocess_end_time - preprocess_start_time:.4f}s")
+        log.info(f"Upload observation size: {upload_data_size / 1024:.2f} KB")
 
         transmission_start_time = time()
         request_data = StepRequest(observation=serialized_obs).model_dump(mode='json')
@@ -126,42 +203,54 @@ class AgentServer:
 
         response_data = response.json()
         transmission_end_time = time()
-
-        cloud_data: dict = response_data['action'][0]
         cloud_inference_latency = response_data['action'][0].pop('processing_time')
         cloud_response_latency = transmission_end_time - transmission_start_time
         transmission_latency = cloud_response_latency - cloud_inference_latency
 
-        log.info(f"[TIME] Cloud inference time: {cloud_inference_latency:.4f}s")
+        log.info(f"[TIME] Actual cloud inference time: {cloud_inference_latency:.4f}s")
         log.info(f"[TIME] Actual transmission time: {transmission_latency:.4f}s")
 
-        # self.update_bandwidth(compressed_size, transmission_latency)
+        self.inference_logger.record_by_key('s2_infer_time', cloud_inference_latency)
+        self.inference_logger.record_by_key('trans_time', transmission_latency)
 
+        self.update_bandwidth(upload_data_size, transmission_latency)
+        return response_data
+    
+    def preprocess_obs(self, obs: List[Dict[str, Any]]):
+        start_time = time()
+        obs[0] = remove_from_obs(obs[0])
+        
+        if self.current_stage == 's1':
+            self.current_stage = self.switch_stage(obs[0]['rgb'])
+
+        obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         if self.current_stage == 's2':
-            traj_latents = cloud_data.get('traj_latents', None)  # obtain traj_latents for System1
-            if traj_latents is not None:
-                traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device)
-                # draw_heatmap_on_image(orgin_rgb, important_map, suffix='_goal')
-                obs[0]['rgb'] = orgin_rgb  # Use original RGB for System1 processing
-                self.s1_agent.record_goal_obs(obs[0], traj_latents)
-                s1_response_data = self.s1_agent.step(obs[0])
-
-                self.forward_step_num += 1
-                self.current_stage = 's1'
-                return s1_response_data
-            else:
-                # draw_heatmap_on_image(orgin_rgb, important_map)
-                response_data['action'][0].pop('traj_latents', None)  # Remove traj_latents if not present
-                return response_data
+            self.forward_step_num = 0            
+            response_data = self._request_s2(obs, start_time)
         else:
-            obs[0]['rgb'] = orgin_rgb
-            s1_response_data = self.s1_agent.step(obs[0])
+            origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
+
+            if self.set_adaptive_compression:
+                # Estimate transmission latency
+                estimated_transmission_time = self.cal_transmission_time(len(serialize_obs(obs)))
+                preprocess_time = time() - start_time
+                self.if_compressed = (estimated_transmission_time is not None) and \
+                    ((estimated_transmission_time + preprocess_time) > self.cloud_latency_threshold)
+                log.info(f"Image compression needed: {self.if_compressed}")
+
+            self._transmit_obs(obs, start_time) # transmit the continuous observations to the server
+
+            obs[0]['rgb'] = origin_rgb # restore 
+            obs[0]['depth'] = depth # restore 
+            preprocess_time = time() - start_time
+            obs[0]['latency_constraint'] = self.e2e_latency_threshold - preprocess_time
+            response_data = self.s1_agent.step(obs[0])
+            
             self.forward_step_num += 1
 
-            if self.forward_step_num > self.PLAN_STEP_GAP and len(self.s1_agent.action_list) == 0:
-                self.current_stage = 's2'
-                self.forward_step_num = 0
-            return s1_response_data
+        self.inference_logger.record_by_key('total_step_time', time() - start_time)
+        self.inference_logger.flush()
+        return response_data
 
     async def reset_agent(self, agent_name: str, request: ResetRequest):
         self._validate_agent_exists(agent_name)
@@ -178,17 +267,27 @@ class AgentServer:
 
         self.current_stage = 's2'  # Reset to initial stage after reset
         self.forward_step_num = 0
+        self.episode += 1
+        os.makedirs(f"logs/test_data/episode_{self.episode}", exist_ok=True)
 
+        self.inference_logger.reset()
         return response.json()
 
-    def estimate_transmission_time(self, upload_size_bytes):
-        if self.ema_bandwidth is None:
-            return  # Bandwidth not yet estimated, cannot provide a reliable estimate
+    def estimate_cloud_latency(self, upload_size_bytes):
+        estimate_transmission_time = self.cal_transmission_time(upload_size_bytes)
+        if estimate_transmission_time is None:
+            return
         
-        transmission_delay = (upload_size_bytes * 8) / self.ema_bandwidth
-        return transmission_delay
+        max_s2_inference_time = self.infer_profile_data['s2_infer']['max_inference_time']
+        return estimate_transmission_time + max_s2_inference_time
 
-    def update_bandwidth(self, data_size, transmission_latency, alpha=0.2):
+    def cal_transmission_time(self, upload_size_bytes):
+        if self.ema_bandwidth is None:
+            return 
+        
+        return upload_size_bytes / self.ema_bandwidth
+    
+    def update_bandwidth(self, data_size, transmission_latency, alpha=0.3):
         '''
         Update the bandwidth estimation.
 
@@ -197,7 +296,7 @@ class AgentServer:
             upload_latency: The time taken for the transmission (in seconds).
             alpha: The smoothing factor for EMA.
         '''
-        bandwidth = (data_size * 8) / transmission_latency # bps
+        bandwidth = data_size / transmission_latency # Bytes/s
         if self.ema_bandwidth is None:
             self.ema_bandwidth = bandwidth
         else:

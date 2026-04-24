@@ -90,8 +90,8 @@ class VisionEncoder:
         image = Image.fromarray(image)
 
         # NEW: 压分辨率，加速vit推理
-        w, h = image.size
-        image = image.resize((w//2, h//2))
+        # w, h = image.size
+        # image = image.resize((w//2, h//2))
 
         inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
 
@@ -120,12 +120,12 @@ def draw_origin_image(image: np.array, pixel=None, suffix=''):
             (50, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
-            (255, 0, 0),
+            (0, 255, 0),
             2,
         )
-        image = cv2.circle(image, (pixel[1], pixel[0]), 5, (0, 0, 255), -1)
+        image = cv2.circle(image, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
 
-    cv2.imwrite(f'logs/test_data/origin_image_{time.time()}{suffix}.jpg', image)  # 保存原始图像以供对比
+    cv2.imwrite(f'logs/test_data/origin_image_{time.time()}{suffix}.png', image)  # 保存原始图像以供对比
 
 
 def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix=''):
@@ -152,12 +152,12 @@ def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix
             (50, 100),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
-            (255, 0, 0),
+            (0, 128, 0),
             2,
         )
-        overlayed_image = cv2.circle(overlayed_image, (pixel[1], pixel[0]), 5, (0, 0, 255), -1)
+        overlayed_image = cv2.circle(overlayed_image, (pixel[1], pixel[0]), 5, (0, 128, 0), -1)
 
-    cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.jpg', overlayed_image)  # 保存叠加后的图像以供对比
+    cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.png', overlayed_image)  # 保存叠加后的图像以供对比
 
 
 def generate_mask(shape, zero_ratio=0.01):
@@ -236,53 +236,6 @@ def random_compression(image: np.array, importance, keep_ratio=0.1, compression_
             patch = image[y1:y2, x1:x2, :]
             
             if rand_mask[i, j]:
-                # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
-                compressed_patch = cv2.resize(patch, 
-                                              (patch_size//compression_factor, patch_size//compression_factor), 
-                                              interpolation=cv2.INTER_AREA)
-                compressed_data.append(compressed_patch)
-                metadata.append(0) # 标记为压缩
-            else:
-                compressed_data.append(patch)
-                metadata.append(1) # 标记为原始
-    
-    return compressed_data, metadata
-
-
-def numpy_compression_by_patch(image, importance, keep_ratio=0.1, compression_factor=4):
-    """
-    image_np: (C, H, W) 的 numpy 数组
-    attn_map: (h, w) 的注意力热力图，与 patch 数量对应
-    threshold: 低于此阈值的区域将被压缩
-    """
-    H, W, _ = image.shape
-
-    # NEW: patch importance 还原回(17, 23)，与原图对应
-    importance = cv2.resize(importance, (23, 17), interpolation=cv2.INTER_LINEAR) # (17, 23)
-
-    patch_size = H // importance.shape[0] # 28
-
-    threshold = np.percentile(importance, (1 - keep_ratio) * 100)  # 根据百分位数动态确定阈值
-    
-    # 1. 标识低兴趣区域 (Low Interest Mask)
-    mask = (importance < threshold)
-    
-    # 2. 分离数据：我们将图像切分为 Patch 列表
-    # 重要区域保留原始 patch，不重要区域进行池化
-    compressed_data = []
-    metadata = [] # 记录位置信息用于还原
-    
-    # idx = 0
-    for i in range(importance.shape[0]):
-        for j in range(importance.shape[1]):
-            # 获取当前 patch 的像素范围
-            y1, y2 = i * patch_size, (i + 1) * patch_size
-            x1, x2 = j * patch_size, (j + 1) * patch_size
-            y2 = min(y2, H)  # 防止越界
-            x2 = min(x2, W)
-            patch = image[y1:y2, x1:x2, :]
-            
-            if mask[i, j]:
                 # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
                 compressed_patch = cv2.resize(patch, 
                                               (patch_size//compression_factor, patch_size//compression_factor), 
