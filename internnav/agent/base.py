@@ -34,4 +34,5 @@ class Agent:
         """
         Init a agent instance from a config.
         """
+        # import pdb; pdb.set_trace()
         return cls.agents[config.model_name](config)

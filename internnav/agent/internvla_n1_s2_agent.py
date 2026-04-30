@@ -314,8 +314,6 @@ class System2:
         self.rgb_list = []
         self.depth_list = []
         self.pose_list = []
-        self.conversation_history = []
-        self.llm_output = ""
         self.past_key_values = None
         self.last_s2_idx = -100
 

@@ -6,7 +6,6 @@ import cv2
 import torchvision.models as models
 import torch.nn as nn
 import torch
-from transformers import CLIPVisionModel, CLIPImageProcessor
 from torchvision.transforms import v2
 from transformers import (
     Qwen2_5_VisionTransformerPretrainedModel,
@@ -67,19 +66,6 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
         self.window_size = window_size
         self.fullatt_block_indexes = fullatt_block_indexes
         self.out_hidden_size = out_hidden_size
-
-
-def init_visual_encoder(visual_encoder_path: str, 
-                        device = torch.device('cuda')):
-    # set_random_seed(0)
-    clip_model = CLIPVisionModel.from_pretrained(visual_encoder_path)
-    clip_model.to(device)
-    clip_model.eval()
-    clip_processor = CLIPImageProcessor.from_pretrained(visual_encoder_path)
-
-    vgg_feature_extractor = LightFeatureExtractor().to(device)
-    vgg_feature_extractor.eval()
-    return clip_model, clip_processor, vgg_feature_extractor
 
 
 def init_vit_model(model_dir: str, device) -> Qwen2_5_VisionTransformerPretrainedModel:

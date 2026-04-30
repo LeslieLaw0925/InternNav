@@ -15,7 +15,7 @@ from torchvision.transforms import v2
 from internnav.configs.agent import AgentCfg, NewAgentCfg, InitRequest, ResetRequest, StepRequest
 from internnav.agent.internvla_n1_s1_agent import System1
 from internnav.utils.common_log_util import common_logger as log
-from .client_utils import init_visual_encoder, image_preprocess
+from .client_utils import image_preprocess
 from .visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image, numpy_compression
 
 
