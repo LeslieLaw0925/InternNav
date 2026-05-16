@@ -1,5 +1,5 @@
 # from scripts.eval.configs.agent import *
-from internnav.configs.agent import AgentCfg, NewAgentCfg
+from internnav.configs.agent import NewAgentCfg
 from internnav.configs.evaluator import (
     EnvCfg,
     EvalCfg,
@@ -15,32 +15,7 @@ eval_cfg = EvalCfg(
         local_server_port=8023,
         model_name='internvla_n1_cloud',
         ckpt_path='',
-        model_settings={
-            'env_num': 1,
-            'sim_num': 1,
-            'model_path': "checkpoints/InternVLA-N1-DualVLN",
-            # 'model_path': "checkpoints/InternVLA-N1-w-NavDP",
-            's1_type': 'nextdit_async', # 'nextdit_async' or 'navdp_async'
-            'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
-            'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
-            'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],
-            'width': 640,
-            'height': 480,
-            'hfov': 79,
-            'resize_w': 384,
-            'resize_h': 384,
-            'max_new_tokens': 1024,
-            'num_frames': 32,
-            'num_history': 8,
-            'num_future_steps': 4,
-            'device': 'cuda:0',
-            'predict_step_nums': 32,
-            'continuous_traj': True,
-            'infer_mode': 'partial_async',  # You can choose "sync" or "partial_async", but for this model, "partial_async" is better.
-            # debug
-            'vis_debug': True,  # If vis_debug=True, you can get visualization results
-            'vis_debug_path': './logs/test_n1/vis_debug',
-        },
+        model_settings={},
     ),
     env=EnvCfg(
         env_type='internutopia',

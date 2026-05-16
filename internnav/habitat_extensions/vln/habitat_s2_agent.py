@@ -5,8 +5,11 @@ import re
 from collections import OrderedDict
 import random
 import argparse
+import time
+import cv2
 
 import numpy as np
+from PIL import Image
 import torch
 from transformers import AutoProcessor
 from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
@@ -33,6 +36,8 @@ class System2(Agent):
         self.model_args = argparse.Namespace(**config.model_settings)
         self.vis_debug = bool(getattr(self.model_args, "vis_debug", False))
         self.vis_debug_path = getattr(self.model_args, "vis_debug_path", os.path.join(self.output_path, "vis_debug"))
+        self.height = self.model_args.height
+        self.width = self.model_args.width
 
         processor = AutoProcessor.from_pretrained(self.model_args.model_path)
         processor.tokenizer.padding_side = 'left'
@@ -112,16 +117,21 @@ class System2(Agent):
         return list(actions)
 
     def step_no_infer(self, rgb):
+        if isinstance(rgb, np.ndarray):
+            rgb = Image.fromarray(rgb)
         image = rgb.resize((self.model_args.resize_w, self.model_args.resize_h))
         self.rgb_list.append(image)
 
     def step(self, obs: dict):
+        start_time = time.time()
+
+        is_compressed = obs.get('compressed', 0)
+        look_down_image = self.restore_img_by_patch(obs['rgb']) if is_compressed else obs['rgb']
         instruction = obs.get('instruction')
         if instruction is None:
-            self.step_no_infer(obs.get('rgb'))
-            return {}
+            self.step_no_infer(look_down_image)
+            return {'processing_time': time.time() - start_time}
         
-        look_down_image = obs.get('rgb')
         look_down = obs.get('look_down', False)
         step_id = obs.get('step_id', 0)
 
@@ -197,13 +207,48 @@ class System2(Agent):
             with torch.no_grad():
                 traj_latents = self.model.generate_latents(output_ids, pixel_values, image_grid_thw)
             traj_latents = traj_latents.detach().cpu().to(dtype=torch.float32).numpy().tolist()
-            # import pdb; pdb.set_trace()
             return {'action_seq': [],
                     'traj_latents': traj_latents,
-                    'pixel_goal': pixel_goal,}
+                    'pixel_goal': pixel_goal,
+                    'processing_time': time.time() - start_time}
         else:
             action_seq = self.parse_actions(self.llm_outputs)
             print('actions', action_seq, flush=True)        
             return {'action_seq': action_seq,
                     'traj_latents': None,
-                    'pixel_goal': None,}
+                    'pixel_goal': None,
+                    'processing_time': time.time() - start_time}
+        
+    def restore_img_by_patch(self, compressed_data, patch_size=28):
+        compressed_data_patch, metadata = compressed_data
+        h, w = self.height // patch_size, self.width // patch_size + 1 # 17， 23
+
+        # 1. 创建一个空白画布
+        reconstructed_img = np.zeros((self.height, self.width, 3), dtype=compressed_data_patch[0].dtype)
+        
+        patch_idx = 0
+        for i in range(h):
+            for j in range(w):
+                h_patch_size, w_patch_size = patch_size, patch_size             
+                if (i + 1) * patch_size > self.height:
+                    h_patch_size = self.height - i * patch_size
+                if (j + 1) * patch_size > self.width:
+                    w_patch_size = self.width - j * patch_size
+                
+                patch = compressed_data_patch[patch_idx]
+                if metadata[patch_idx] == 0:
+                    patch = cv2.resize(patch, 
+                                       (w_patch_size, h_patch_size), 
+                                       interpolation=cv2.INTER_LINEAR)
+             
+                # 3. 将 patch 填入对应位置
+                y1, y2 = i * patch_size, (i + 1) * patch_size
+                x1, x2 = j * patch_size, (j + 1) * patch_size
+                y2 = min(y2, self.height)  # 确保不超过边界
+                x2 = min(x2, self.width)  # 确保不超过边界
+
+                reconstructed_img[y1:y2, x1:x2, :] = patch
+            
+                patch_idx += 1
+
+        return reconstructed_img
