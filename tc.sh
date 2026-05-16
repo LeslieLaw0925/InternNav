@@ -3,7 +3,7 @@
 # --- 配置區 ---
 IFACE="eno1"        # 你的網卡名稱
 TRACE_FILE="4g_trace.txt"
-INTERVAL=90          # 每筆數據的切換間隔（秒）
+INTERVAL=100          # 每筆數據的切換間隔（秒）
 # --------------
 
 if [[ ! -f "$TRACE_FILE" ]]; then

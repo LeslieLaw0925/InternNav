@@ -20,7 +20,7 @@ import sys
 
 # Import for agent registry side effects — do not remove
 # from internnav.agent import Agent  # noqa: F401
-from internnav.utils import AgentServer
+from internnav.utils import IssacAgentServer as AgentServer
 from internnav.utils import common_log_util
 
 

@@ -2,7 +2,7 @@ import json
 
 
 class InferenceLogger:
-    def __init__(self, log_path="logs/inference_latency.jsonl"):
+    def __init__(self, log_path="logs/system_perf.jsonl"):
         self.log_path = log_path
         self.entry = {}
 

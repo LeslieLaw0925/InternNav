@@ -14,8 +14,7 @@ from transformers import (
     AutoTokenizer,
 )
 
-from internnav.utils.common_log_util import common_logger as log
-from internnav.model.utils.misc import set_random_seed
+# from internnav.utils.common_log_util import common_logger as log
 
 
 class Qwen2_5_VLVisionConfig(PretrainedConfig):
@@ -59,7 +58,9 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
 class VisionEncoder:
 
     def __init__(self, s1_type, device='cuda'):
-        set_random_seed(0)
+        # from internnav.model.utils.misc import set_random_seed
+        # set_random_seed(0)
+
         self.device = device
 
         model_dir = 'checkpoints/Qwen2_5_VisionTransformer'
@@ -90,8 +91,8 @@ class VisionEncoder:
         image = Image.fromarray(image)
 
         # NEW: 压分辨率，加速vit推理
-        # w, h = image.size
-        # image = image.resize((w//2, h//2))
+        w, h = image.size
+        image = image.resize((w//4, h//4))
 
         inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
 
@@ -157,8 +158,8 @@ def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix
         )
         overlayed_image = cv2.circle(overlayed_image, (pixel[1], pixel[0]), 5, (0, 128, 0), -1)
 
-    cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.png', overlayed_image)  # 保存叠加后的图像以供对比
-
+    # cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.png', overlayed_image)  # 保存叠加后的图像以供对比
+    cv2.imwrite(f"./heatmap_overlay_{time.time()}{suffix}.png", overlayed_image)  # 保存叠加后的图像以供对比
 
 def generate_mask(shape, zero_ratio=0.01):
     """
@@ -249,35 +250,308 @@ def random_compression(image: np.array, importance, keep_ratio=0.1, compression_
     return compressed_data, metadata
 
 
+def visualize_patch_scores(
+    image_path,
+    scores,
+    alpha=0.35,
+    line_thickness=2,
+    fontsize=6
+):
+    import matplotlib.pyplot as plt
+
+    """
+    image_path: 输入图片路径 (480x640)
+    scores: 17x23 的 patch importance score (numpy array)
+    """
+
+    # 读取图片
+    img = cv2.imread(image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    H, W = img.shape[:2]
+
+    # patch 数量
+    rows, cols = scores.shape
+
+    # 每个 patch 的大小
+    patch_h = H / rows
+    patch_w = W / cols
+
+    # 创建浅色透明效果
+    overlay = np.ones_like(img, dtype=np.uint8) * 255
+    img_vis = cv2.addWeighted(img, 1 - alpha, overlay, alpha, 0)
+
+    # 画网格
+    for r in range(rows + 1):
+        y = int(r * patch_h)
+        cv2.line(
+            img_vis,
+            (0, y),
+            (W, y),
+            color=(255, 255, 255),
+            thickness=line_thickness
+        )
+
+    for c in range(cols + 1):
+        x = int(c * patch_w)
+        cv2.line(
+            img_vis,
+            (x, 0),
+            (x, H),
+            color=(255, 255, 255),
+            thickness=line_thickness
+        )
+
+    # 写 score
+    for r in range(rows):
+        for c in range(cols):
+
+            score = scores[r, c]
+
+            # patch 中心
+            center_x = int((c + 0.5) * patch_w)
+            center_y = int((r + 0.5) * patch_h)
+
+            text = f"{score:.3f}"
+
+            cv2.putText(
+                img_vis,
+                text,
+                (center_x - 25, center_y + 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                fontsize / 15,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA
+            )
+
+    # 显示
+    plt.figure(figsize=(12, 8))
+    plt.imshow(img_vis)
+    plt.axis("off")
+    plt.tight_layout(pad=0.1)
+    plt.savefig(f"./patch_importance_{time.time()}.png")
+
+
+def visualize_adaptive_compression(
+    image_path,
+    scores,
+    ratio=0.3,
+    downsample_factor=8,
+    line_thickness=2,
+    fontsize=6,
+):
+    import matplotlib.pyplot as plt
+    """
+    Parameters
+    ----------
+    image_path : str
+        输入图片路径 (480x640)
+
+    scores : np.ndarray
+        patch importance score
+        shape = (17, 23)
+
+    ratio : float
+        保留原分辨率 patch 的比例 (0~1)
+
+    downsample_factor : int
+        低重要区域的 downsample 倍数
+
+    """
+
+    # =========================
+    # Load image
+    # =========================
+    img = cv2.imread(image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    H, W = img.shape[:2]
+
+    rows, cols = scores.shape
+
+    patch_h = H // rows
+    patch_w = W // cols
+
+    # =========================
+    # Select top-k patches
+    # =========================
+    total_patches = rows * cols
+    k = int(total_patches * ratio)
+
+    flat_scores = scores.flatten()
+
+    # Top-k threshold
+    sorted_idx = np.argsort(flat_scores)[::-1]
+    keep_idx = sorted_idx[:k]
+
+    keep_mask = np.zeros(total_patches, dtype=bool)
+    keep_mask[keep_idx] = True
+    keep_mask = keep_mask.reshape(rows, cols)
+
+    # =========================
+    # Create output image
+    # =========================
+    output = np.zeros_like(img)
+
+    for r in range(rows):
+        for c in range(cols):
+
+            y1 = r * patch_h
+            y2 = (r + 1) * patch_h
+
+            x1 = c * patch_w
+            x2 = (c + 1) * patch_w
+
+            patch = img[y1:y2, x1:x2]
+
+            # =====================
+            # Keep original patch
+            # =====================
+            if keep_mask[r, c]:
+
+                output[y1:y2, x1:x2] = patch
+                # Put score
+                score_text = f"{scores[r, c]:.3f}"
+
+                # patch 中心
+                center_x = int((c + 0.5) * patch_w)
+                center_y = int((r + 0.5) * patch_h)
+
+                cv2.putText(
+                    output,
+                    score_text,
+                    (center_x - 25, center_y + 4),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    fontsize / 15,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA
+                )
+
+            # =====================
+            # Downsample patch
+            # =====================
+            else:
+
+                small = cv2.resize(
+                    patch,
+                    (
+                        max(1, patch_w // downsample_factor),
+                        max(1, patch_h // downsample_factor)
+                    ),
+                    interpolation=cv2.INTER_LINEAR
+                )
+
+                restored = cv2.resize(
+                    small,
+                    (patch_w, patch_h),
+                    interpolation=cv2.INTER_NEAREST
+                )
+
+                output[y1:y2, x1:x2] = restored
+
+    # 画网格
+    for r in range(rows + 1):
+        y = int(r * patch_h)
+        cv2.line(
+            output,
+            (0, y),
+            (W, y),
+            color=(255, 255,255),
+            thickness=line_thickness
+        )
+
+    for c in range(cols + 1):
+        x = int(c * patch_w)
+        cv2.line(
+            output,
+            (x, 0),
+            (x, H),
+            color=(255, 255,255),
+            thickness=line_thickness
+        )
+
+    # =========================
+    # Visualization
+    # =========================
+    plt.figure(figsize=(12, 8))
+    plt.imshow(output)
+    plt.axis("off")
+    plt.tight_layout(pad=0.1)
+    plt.savefig(f"./adaptive_compression_{time.time()}.png")
+
+
+def draw_ceil(image_path, scores, line_thickness=3):
+    import matplotlib.pyplot as plt
+
+    """
+    image_path: 输入图片路径 (480x640)
+    scores: 17x23 的 patch importance score (numpy array)
+    """
+
+    # 读取图片
+    img = cv2.imread(image_path)
+    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    H, W = img.shape[:2]
+
+    # patch 数量
+    rows, cols = scores.shape
+
+    # 每个 patch 的大小
+    patch_h = H / rows
+    patch_w = W / cols
+
+    # 画网格
+    for r in range(rows + 1):
+        y = int(r * patch_h)
+        cv2.line(
+            img,
+            (0, y),
+            (W, y),
+            color=(255, 255, 255),
+            thickness=line_thickness
+        )
+
+    for c in range(cols + 1):
+        x = int(c * patch_w)
+        cv2.line(
+            img,
+            (x, 0),
+            (x, H),
+            color=(255, 255, 255),
+            thickness=line_thickness
+        )
+
+    # 显示
+    plt.figure(figsize=(12, 8))
+    plt.imshow(img)
+    plt.axis("off")
+    plt.tight_layout(pad=0.1)
+    plt.savefig(f"./patch_image_{time.time()}.png")
+
+
 if __name__ == "__main__":
     import os
     os.environ["TRITON_PTXAS_PATH"]="/usr/local/cuda-12.6/bin/ptxas"
 
     import time
 
-    image_path = '000.jpg'
-    vision_encoder = VisionEncoder()
+    image_path = '034.jpg'
+    vision_encoder = VisionEncoder("nextdit_async")
     vision_encoder.vit_model.eval()
 
     image = Image.open(image_path)
 
-    W, H = image.size
-    resize_image = image.resize((384, 384))
-    resize_image.save('resized_image.jpg')  # 保存缩放后的图像以供对比
-
     _, patch_importance = vision_encoder.get_patch_importance(np.array(image))
+    patch_importance = patch_importance.cpu().numpy()
 
-    start_time = time.time()
-    _, patch_importance = vision_encoder.get_patch_importance(np.array(image))
-    end_time = time.time()
-    print(f"Original image processing time: {end_time - start_time:.4f} seconds")
-    draw_heatmap_on_image(np.array(image), patch_importance, suffix='_original')
+    draw_ceil(image_path, patch_importance, line_thickness=5)
+    visualize_patch_scores(image_path, patch_importance, line_thickness=5, fontsize=10)
+    visualize_adaptive_compression(image_path, patch_importance, line_thickness=5, fontsize=10)
+    # draw_heatmap_on_image(np.array(image), patch_importance, suffix='_original')
 
-    start_time = time.time()
-    _, patch_importance_resized = vision_encoder.get_patch_importance(np.array(resize_image))
-    # patch_importance_resized = cv2.resize(patch_importance_resized, (patch_importance.shape[1], patch_importance.shape[0]), interpolation=cv2.INTER_LINEAR)
-    print(f"Resized image processing time: {time.time() - end_time:.4f} seconds")
-    draw_heatmap_on_image(np.array(image), patch_importance_resized, suffix='_resized')
 
        
 

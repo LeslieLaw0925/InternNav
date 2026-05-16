@@ -18,7 +18,6 @@ from internnav.utils.comm_utils.client_utils import find_optimal_config
 class System1:
     def __init__(self, config: NewAgentCfg, 
                  latency_profile: dict, 
-                 set_adaptive_speedup=False,
                  infer_logger=None,
                  device="cuda", 
                  dtype=torch.float16):
@@ -27,7 +26,7 @@ class System1:
 
         vln_sensor_config = config.model_settings
         self.latency_profile = latency_profile
-        self.set_adaptive_speedup = set_adaptive_speedup
+        self.set_adaptive_speedup = vln_sensor_config.get('adaptive_speedup', False)
         self.infer_logger = infer_logger
         self.device = device
         self.dtype = dtype
@@ -80,7 +79,9 @@ class System1:
         if not all([self.pixel_goal_rgb is not None, 
                     self.traj_latents is not None]):
             raise ValueError("Missing required observation for System1 step.")
-
+        
+        start_time = time.time()
+        
         if self.set_adaptive_speedup:
             latency_constraint = obs.pop('latency_constraint')
             log.info(f"[CONSTRAINT] Latency constraint for s1 step: {latency_constraint:.4f} seconds.")
@@ -95,14 +96,15 @@ class System1:
                                                   self.infer_step_range,
                                                   self.traj_num_range)
         else:
-            best_config = {'infer_step': self.infer_step_range[-1], 
-                           'traj_num': self.traj_num_range[-1]}
+        #     best_config = {'infer_step': self.infer_step_range[-1],
+        #                    'traj_num': self.traj_num_range[-1]}
+            best_config = {'infer_step': 14,
+                           'traj_num': 24}
         log.info(f"Chosen config for System1 inference: {best_config}")
 
-        return self.s1_infer(obs, best_config)
+        return self.s1_infer(obs, best_config, start_time)
 
-    def s1_infer(self, obs: dict, config: dict) -> dict[str, list]:
-        start_time = time.time()
+    def s1_infer(self, obs: dict, config: dict, start_time) -> dict[str, list]:
         rgb = obs.get('rgb', None)
         depth = obs.get('depth', None)
         
@@ -133,11 +135,11 @@ class System1:
         # # For visualization and debugging
         # self._draw_traj_img(rgb, rgbs, depths)
         # import pdb; pdb.set_trace()
-
         with torch.no_grad():
-            dp_actions, _ = self.step_s1(self.traj_latents, rgbs, depths_dp=depths, 
+            dp_actions = self.step_s1(self.traj_latents, rgbs, depths_dp=depths, 
                                         num_inference_steps=config['infer_step'], 
                                         num_sample_trajs=config['traj_num'])
+        log.info(f"[TIME] On-device system1 step time: {time.time() - start_time:.4f} seconds.")
                 
         action_list, traj_var = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]
@@ -153,31 +155,8 @@ class System1:
         if len(self.action_list) < self.sys1_forward_step:
             self.ready_to_reach_goal = True
 
+        self.infer_logger.record_by_key("s1_time", time.time() - start_time)
         return {'action': [{'action': [self.action_list.pop(0)], 'ideal_flag': True}]}
-
-    def evaluate_latent(self, traj_latents: torch.Tensor, img_token: torch.Tensor):
-        # 不确定性估计（非常关键）
-        with torch.no_grad():
-            traj_uncertainty = traj_latents.std(dim=1).mean(dim=-1).item()  # [B]
-            img_token_uncertainty = img_token.std(dim=1).mean(dim=-1).item()  # [B]
-
-        uncertainty = 0.7 * traj_uncertainty + 0.3 * img_token_uncertainty
-
-        # normalize 到 0~1
-        # u = torch.clamp(uncertainty / 0.5, 0, 1).item()
-
-        # # 动态分配（你可以调范围）
-        # min_steps, max_steps = 2, 10
-        # min_trajs, max_trajs = 8, 32
-
-        # num_inference_steps = int((min_steps + u.mean() * (max_steps - min_steps)).item())
-        # num_sample_trajs = int((min_trajs + u.mean() * (max_trajs - min_trajs)).item())
-
-        # # 防御
-        # num_inference_steps = max(2, num_inference_steps)
-        # num_sample_trajs = max(8, num_sample_trajs)
-
-        return traj_uncertainty, img_token_uncertainty
 
     def step_s1(
         self,
@@ -206,7 +185,7 @@ class System1:
                 )
             else:
                 all_trajs = self.model.navdp.predict_pointgoal_action(traj_latents)
-            return all_trajs, None
+            return all_trajs
     
     def nextdit_step(self, traj_latents,
                      images_dp,
@@ -233,7 +212,6 @@ class System1:
                 )  # [bs*select_size,512,384]
                 memory_feat = torch.cat([images_dp_feat.flatten(1, 2), memory_feat], dim=-1)
                 memory_tokens = self.model.rgb_resampler(memory_feat)
-                score = self.evaluate_latent(traj_latents, memory_tokens)
             hidden_states = torch.cat([memory_tokens, traj_latents], dim=1)
         else:
             hidden_states = traj_latents
@@ -286,7 +264,7 @@ class System1:
 
             # compute previous: x_t -> x_t-1
             latents = scheduler.step(noise_pred, t, latents).prev_sample
-        return latents.detach(), score
+        return latents.detach()
     
     def reset(self, reset_index=None):
         self.action_list = []

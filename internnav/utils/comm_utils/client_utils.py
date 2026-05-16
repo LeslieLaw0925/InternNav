@@ -137,7 +137,7 @@ def solve_optimal_patch_ratio(image, time_constraint, bandwidth_bps, compression
     
     p_star = (ratio_limit - inv_r2) / (1 - inv_r2)
     # 4. 边界裁剪
-    p_star = min(1, max(0.1, p_star))
+    p_star = min(1, max(0, p_star))
     return p_star
 
 

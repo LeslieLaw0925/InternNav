@@ -21,11 +21,20 @@ from internnav.utils.common_log_util import common_logger as log
 from internnav.utils.comm_utils.visual_encoder import VisionEncoder, numpy_compression_v2, draw_heatmap_on_image, \
     draw_origin_image, random_compression
 from internnav.utils.comm_utils.client_utils import *
-from .spatial_variance import analyze_spatial_distribution
 from internnav.utils.comm_utils.system_log import InferenceLogger
 
 
-class AgentServer:
+class system_perf(enumerate):
+    TRANSMISSION = "transmission_time"
+    S1 = "s1_time"
+    S2 = "s2_time"
+    BW = "bandwidth"
+    STEP = "step_time"
+    STEP_ID = "step_id"
+    # EPISODE_ID = "episode_id"
+
+
+class IssacAgentServer:
     """
     Server class for Agent service.
     """
@@ -49,7 +58,6 @@ class AgentServer:
 
         self.s1_agent = System1(config, 
                                 self.infer_profile_data.get('s1_infer'),
-                                set_adaptive_speedup=False,
                                 infer_logger=self.inference_logger,
                                 device=self.device, dtype=self.dtype)
         vln_sensor_config = config.model_settings
@@ -57,18 +65,18 @@ class AgentServer:
         self.vision_encoder = VisionEncoder(self.s1_type, device=self.device)
 
         self.image_compression_fachtor = 4
-        self.e2e_latency_threshold = 2.0 # seconds
-        self.cloud_latency_threshold = 1.0 # TODO: 需要合理设置这个值, seconds
-        self.s2_trigger_threshold = 6.88631
+        self.e2e_latency_threshold = 1.5 # seconds
+        self.cloud_latency_threshold = 0.5 # TODO: 需要合理设置这个值, seconds
+        # self.s2_trigger_threshold = 6.88631
 
         self.ema_bandwidth = None
         self.current_stage = 's2'
         self.forward_step_num = 0
         self.PLAN_STEP_GAP = 8
 
-        self.set_adaptive_compression = False
+        self.set_adaptive_compression = vln_sensor_config.get('adaptive_compression', False)
         self.if_compressed = False
-
+        # import pdb; pdb.set_trace()
         self.episode = 0
         os.makedirs(f"logs/test_data/episode_{self.episode}", exist_ok=True)
         
@@ -110,17 +118,7 @@ class AgentServer:
         obs = transfer(request.observation)
         return self.preprocess_obs(obs)
 
-    def switch_stage(self, rgb):
-        # if len(self.s1_agent.action_list) == 0:
-        #     if self.forward_step_num > self.PLAN_STEP_GAP:
-        #         force_s2 = True
-        #     else:
-        #         _, patch_importance = self.vision_encoder.get_patch_importance(rgb)
-        #         complex = analyze_spatial_distribution(patch_importance)
-        #         force_s2 = (complex > self.s2_trigger_threshold)
-        # else:
-        #     force_s2 = False
-
+    def switch_stage(self):
         force_s2 = (self.forward_step_num > self.PLAN_STEP_GAP) and len(self.s1_agent.action_list) == 0
 
         stage = 's2' if force_s2 else 's1'
@@ -185,8 +183,6 @@ class AgentServer:
                 obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
             self.if_compressed = False
 
-        # obs[0]['rgb'] = numpy_compression_v2(obs[0]['rgb'], compression_factor=4)
-        # obs[0]['compressed'] = 1
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
         log.info(f"Upload observation size: {upload_data_size / 1024:.2f} KB")
@@ -210,10 +206,11 @@ class AgentServer:
         log.info(f"[TIME] Actual cloud inference time: {cloud_inference_latency:.4f}s")
         log.info(f"[TIME] Actual transmission time: {transmission_latency:.4f}s")
 
-        self.inference_logger.record_by_key('s2_infer_time', cloud_inference_latency)
-        self.inference_logger.record_by_key('trans_time', transmission_latency)
+        self.inference_logger.record_by_key(system_perf.S2, cloud_inference_latency)
+        self.inference_logger.record_by_key(system_perf.TRANSMISSION, transmission_latency)
 
         self.update_bandwidth(upload_data_size, transmission_latency)
+        self.inference_logger.record_by_key(system_perf.BW, self.ema_bandwidth)
         return response_data
     
     def preprocess_obs(self, obs: List[Dict[str, Any]]):
@@ -221,7 +218,7 @@ class AgentServer:
         obs[0] = remove_from_obs(obs[0])
         
         if self.current_stage == 's1':
-            self.current_stage = self.switch_stage(obs[0]['rgb'])
+            self.current_stage = self.switch_stage()
 
         obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         if self.current_stage == 's2':
@@ -248,8 +245,9 @@ class AgentServer:
             
             self.forward_step_num += 1
 
-        self.inference_logger.record_by_key('total_step_time', time() - start_time)
+        self.inference_logger.record_by_key(system_perf.STEP, time() - start_time)
         self.inference_logger.flush()
+
         return response_data
 
     async def reset_agent(self, agent_name: str, request: ResetRequest):
@@ -278,8 +276,8 @@ class AgentServer:
         if estimate_transmission_time is None:
             return
         
-        max_s2_inference_time = self.infer_profile_data['s2_infer']['max_inference_time']
-        return estimate_transmission_time + max_s2_inference_time
+        # max_s2_inference_time = self.infer_profile_data['s2_infer']['max_inference_time']
+        return estimate_transmission_time
 
     def cal_transmission_time(self, upload_size_bytes):
         if self.ema_bandwidth is None:
