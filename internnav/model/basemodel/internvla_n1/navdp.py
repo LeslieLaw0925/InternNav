@@ -125,6 +125,14 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
         try:
             pretrained_dict = torch.load(self.navdp_pretrained)
 
+            # # 统计真正的参数量
+            # total_params = 0
+            # for k, v in pretrained_dict.items():
+            #     # 过滤掉非张量数据，并且排除非骨干网络的附加状态（如某些历史步数统计）
+            #     if isinstance(v, torch.Tensor):
+            #         total_params += v.numel()
+            # import pdb; pdb.set_trace()
+
             if 'state_dict' in pretrained_dict:
                 pretrained_dict = pretrained_dict['state_dict']
 

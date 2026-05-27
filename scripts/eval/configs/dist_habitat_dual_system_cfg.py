@@ -1,4 +1,4 @@
-from internnav.configs.agent import AgentCfg, NewAgentCfg
+from internnav.configs.agent import NewAgentCfg
 from internnav.configs.evaluator import EnvCfg, EvalCfg
 
 eval_cfg = EvalCfg(

@@ -31,6 +31,7 @@ class system_perf(enumerate):
     BW = "bandwidth"
     STEP = "step_time"
     STEP_ID = "step_id"
+    COMP_RATIO = "comp_ratio"
     # EPISODE_ID = "episode_id"
 
 
@@ -67,7 +68,6 @@ class IssacAgentServer:
         self.image_compression_fachtor = 4
         self.e2e_latency_threshold = 1.5 # seconds
         self.cloud_latency_threshold = 0.5 # TODO: 需要合理设置这个值, seconds
-        # self.s2_trigger_threshold = 6.88631
 
         self.ema_bandwidth = None
         self.current_stage = 's2'
@@ -141,12 +141,6 @@ class IssacAgentServer:
 
         if traj_latents is not None:
             traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device, self.dtype)
-
-            # _ , patch_importance = self.vision_encoder.get_patch_importance(origin_rgb)
-            # draw_heatmap_on_image(origin_rgb, patch_importance,
-            #                       pixel=cloud_data.get('pixel_goal'),
-            #                       episode=self.episode)
-            # draw_origin_image(origin_rgb, pixel=cloud_data.get('pixel_goal')) # for s1 visualization
             
             obs[0]['rgb'] = origin_rgb
             obs[0]['depth'] = depth
@@ -163,6 +157,7 @@ class IssacAgentServer:
         return response_data
     
     def _transmit_obs(self, obs: List[Dict[str, Any]], start_time: float):
+        origin_upload_size = None
         if self.if_compressed:
             image = obs[0]['rgb']
             vit_latency, patch_importance = self.vision_encoder.get_patch_importance(image)
@@ -176,6 +171,7 @@ class IssacAgentServer:
                                                compression_factor=self.image_compression_fachtor)
             log.info(f"Calculated patch keep ratio (p_star): {p_star:.4f}")
             if p_star < 1.0:
+                origin_upload_size = len(serialize_obs(obs))
                 obs[0]['rgb'] = numpy_compression_by_patch(image, 
                                                            patch_importance, 
                                                            keep_ratio=p_star, 
@@ -211,6 +207,9 @@ class IssacAgentServer:
 
         self.update_bandwidth(upload_data_size, transmission_latency)
         self.inference_logger.record_by_key(system_perf.BW, self.ema_bandwidth)
+        if origin_upload_size is not None:
+            self.inference_logger.record_by_key(system_perf.COMP_RATIO, \
+                                                (origin_upload_size - upload_data_size) / origin_upload_size)
         return response_data
     
     def preprocess_obs(self, obs: List[Dict[str, Any]]):

@@ -120,7 +120,7 @@ def solve_optimal_patch_ratio(image, time_constraint, bandwidth_bps, compression
         return 1.0  # 无法获取带宽信息，默认图像不做压缩
         
     if time_constraint <= 0:
-        return 0.1  # 时延要求太苛刻，即使压缩到极限也无法满足，给最低的patch ratio
+        return 0  # 时延要求太苛刻，即使压缩到极限也无法满足，给最低的patch ratio
     
     h, w, c = image.shape
     # 掩码数组大小 (Bytes)，每个 patch 需要 1 bit 来标记是否保留高分辨率

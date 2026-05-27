@@ -31,7 +31,7 @@ class InternVLAN1AsyncAgent:
         self.model = InternVLAN1ForCausalLM.from_pretrained(
             args.model_path,
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            # attn_implementation="flash_attention_2",
             device_map={"": self.device},
         )
         self.model.eval()
@@ -128,9 +128,11 @@ class InternVLAN1AsyncAgent:
         dual_sys_output = S2Output()
         no_output_flag = self.output_action is None and self.output_latent is None
         if (self.episode_idx - self.last_s2_idx > self.PLAN_STEP_GAP) or look_down or no_output_flag:
+            start_time = time.time()
             self.output_action, self.output_latent, self.output_pixel = self.step_s2(
                 rgb, depth, pose, instruction, intrinsic, look_down
             )
+            print(f"S2 inference time is {time.time() - start_time}.")
             self.last_s2_idx = self.episode_idx
             dual_sys_output.output_pixel = self.output_pixel
             self.pixel_goal_rgb = copy.deepcopy(rgb)

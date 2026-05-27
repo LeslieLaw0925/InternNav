@@ -161,6 +161,7 @@ def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix
     # cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.png', overlayed_image)  # 保存叠加后的图像以供对比
     cv2.imwrite(f"./heatmap_overlay_{time.time()}{suffix}.png", overlayed_image)  # 保存叠加后的图像以供对比
 
+
 def generate_mask(shape, zero_ratio=0.01):
     """
     shape: tuple，例如 (224, 224) 或 (16, 16)
