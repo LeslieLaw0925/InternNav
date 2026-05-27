@@ -1,5 +1,5 @@
 # from scripts.eval.configs.agent import *
-from internnav.configs.agent import AgentCfg, NewAgentCfg
+from internnav.configs.agent import NewAgentCfg
 from internnav.configs.evaluator import (
     EnvCfg,
     EvalCfg,
@@ -10,18 +10,17 @@ from internnav.configs.evaluator import (
 
 eval_cfg = EvalCfg(
     agent=NewAgentCfg(
-        cloud_server_host='192.168.105.5',
-        cloud_server_port=31532,
+        cloud_server_host='192.168.105.10',
+        cloud_server_port=8023,
         local_server_port=8023,
         model_name='internvla_n1_cloud',
         ckpt_path='',
-        visual_encoder='checkpoints/clip-vit-base-patch16',
         model_settings={
             'env_num': 1,
             'sim_num': 1,
-            'model_path': "checkpoints/InternVLA-N1-DualVLN",
-            # 'model_path': "checkpoints/InternVLA-N1-w-NavDP",
-            's1_type': 'nextdit_async', # 'nextdit_async' or 'navdp_async'
+            # 'model_path': "checkpoints/InternVLA-N1-DualVLN",
+            'model_path': "checkpoints/InternVLA-N1-w-NavDP",
+            's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
             'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
             'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
             'camera_intrinsic': [[585.0, 0.0, 320.0], [0.0, 585.0, 240.0], [0.0, 0.0, 1.0]],
@@ -74,7 +73,7 @@ eval_cfg = EvalCfg(
         dataset_type="mp3d",
         dataset_settings={
             'base_data_dir': 'data/vln_pe/raw_data/r2r',
-            'split_data_types': ['val_unseen'],  # 'val_seen'
+            'split_data_types': ['val_unseen'],  # 'val_seen' or 'val_unseen'
             'filter_stairs': True,  # For iros challenge, this is False; For results in the paper, this is True.
             # 'selected_scans': ['zsNo4HB9uLZ'],
             # 'selected_scans': ['8194nk5LbLH', 'pLe4wQe7qrG'],
@@ -83,7 +82,7 @@ eval_cfg = EvalCfg(
     eval_type='vln_distributed',
     eval_settings={
         'save_to_json': True,
-        'vis_output': True,
+        'vis_output': False,
         'use_agent_server': True,  # If use_agent_server=True, please start the agent server first.
     },
 )

@@ -45,10 +45,11 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
         self.use_critic = use_critic
         self.token_dim = token_dim
         self.vlm_token_dim = vlm_token_dim
-        if input_dtype == "bf16":
-            self.input_dtype = torch.bfloat16
-        else:
-            self.input_dtype = torch.float32
+        # if input_dtype == "bf16":
+        #     self.input_dtype = torch.bfloat16
+        # else:
+        #     self.input_dtype = torch.float32
+        self.input_dtype = torch.float16
 
         self.rgbd_encoder = DAT_RGBD_Patch_Backbone(  # noqa: F405
             image_size, token_dim, memory_size=memory_size, finetune=finetune, version=navdp_version
@@ -195,7 +196,12 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
         return output
 
     def predict_pointgoal_action_async(
-        self, vlm_tokens, input_images=None, input_depths=None, vlm_mask=None, sample_num=32
+        self, vlm_tokens, 
+        input_images=None, 
+        input_depths=None, 
+        vlm_mask=None,
+        infer_step=20,
+        sample_num=32
     ):
         """
         Predict action sequence for point goal navigation using diffusion-based approach.
@@ -244,7 +250,8 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
             )
             naction = noisy_action
 
-            self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
+            self.noise_scheduler.set_timesteps(infer_step)
+            # self.noise_scheduler.set_timesteps(self.noise_scheduler.config.num_train_timesteps)
             for k in self.noise_scheduler.timesteps[:]:
                 noise_pred = self.predict_noise(naction, k.unsqueeze(0), vlm_embed, rgbd_embed)
                 naction = self.noise_scheduler.step(model_output=noise_pred, timestep=k, sample=naction).prev_sample
@@ -252,7 +259,12 @@ class NavDP_Policy_DPT_CriticSum_DAT(nn.Module):
             current_trajectory = naction
             return current_trajectory
 
-    def predict_pointgoal_action(self, vlm_tokens, input_images=None, input_depths=None, vlm_mask=None, sample_num=32):
+    def predict_pointgoal_action(self, vlm_tokens, 
+                                 input_images=None, 
+                                 input_depths=None, 
+                                 vlm_mask=None, 
+                                 sample_num=32
+                                 ):
         """
         Args:
             vlm_tokens: bs*sel_num, token_nums, 3584

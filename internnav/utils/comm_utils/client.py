@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from internnav.configs.agent import AgentCfg, InitRequest, ResetRequest, StepRequest
+from internnav.configs.agent import NewAgentCfg, InitRequest, ResetRequest, StepRequest
 
 
 def serialize_obs(obs):
@@ -18,11 +18,11 @@ class AgentClient:
     Client class for Agent service.
     """
 
-    def __init__(self, config: AgentCfg):
-        self.base_url = f'http://{config.server_host}:{config.server_port}'
+    def __init__(self, config: NewAgentCfg):
+        self.base_url = f'http://{config.cloud_server_host}:{config.cloud_server_port}'
         self.agent_name = self._initialize_agent(config)
 
-    def _initialize_agent(self, config: AgentCfg) -> str:
+    def _initialize_agent(self, config: NewAgentCfg) -> str:
         request_data = InitRequest(agent_config=config).model_dump(mode='json')
 
         response = requests.post(

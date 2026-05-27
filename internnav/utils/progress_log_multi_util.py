@@ -71,12 +71,13 @@ def init(dataset_name, path_count):
     INITED = True
 
 
-def last_log(last_trajectory_id, step_count=-1):
+def last_log(last_trajectory_id, step_count=-1, instruction=None):
     global PROGRESS  # noqa: F824
     global FINISH_PATH_NUM
     FINISH_PATH_NUM += 1
     last_info = PROGRESS.info_map[last_trajectory_id]
-    last_str = f'[{FINISH_PATH_NUM}/{PROGRESS.path_count}][step_index:{step_count}] finish: [trajectory_id:{last_info.trajectory_id}]'
+    last_str = f'{instruction}\n' if instruction is not None else ''
+    last_str = last_str + f'[{FINISH_PATH_NUM}/{PROGRESS.path_count}][step_index:{step_count}] finish: [trajectory_id:{last_info.trajectory_id}]'
     duration = round(last_info.end_time - last_info.start_time, 2)
     step_count = last_info.end_step
     fps = round((step_count / (duration + 1e-10)), 2)
@@ -109,7 +110,7 @@ def trace_start(trajectory_id):
     LAST_TRAJECTORY_ID.add(trajectory_id)
 
 
-def trace_end(trajectory_id, step_count, result):
+def trace_end(trajectory_id, step_count, result, instruction):
     global INITED  # noqa: F824
     if not INITED:
         return
@@ -120,7 +121,7 @@ def trace_end(trajectory_id, step_count, result):
     ti.end_step = step_count
     ti.result = result
     PROGRESS.info_map[trajectory_id] = ti
-    last_log(trajectory_id, step_count)
+    last_log(trajectory_id, step_count, instruction)
     LAST_TRAJECTORY_ID.remove(trajectory_id)
 
 

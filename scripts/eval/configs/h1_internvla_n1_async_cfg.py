@@ -10,6 +10,7 @@ from internnav.configs.evaluator import (
 
 eval_cfg = EvalCfg(
     agent=AgentCfg(
+        server_host='192.168.105.10',
         server_port=8023,
         model_name='internvla_n1',
         ckpt_path='',

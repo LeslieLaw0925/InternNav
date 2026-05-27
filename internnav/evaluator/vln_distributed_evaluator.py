@@ -216,6 +216,7 @@ class VLNDistributedEvaluator(DistributedEvaluator):
                     trajectory_id=self.now_path_key(reset_info),
                     step_count=obs['metrics'][list(obs['metrics'].keys())[0]][0]['steps'],
                     result=obs['metrics'][list(obs['metrics'].keys())[0]][0]['fail_reason'],
+                    instruction=obs['instruction'],
                 )
                 # visualize
                 if self.vis_output:

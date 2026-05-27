@@ -14,6 +14,8 @@ from transformers import (
     AutoTokenizer,
 )
 
+from internnav.utils.common_log_util import common_logger as log
+
 
 class Qwen2_5_VLVisionConfig(PretrainedConfig):
     model_type = "qwen2_5_vl"
@@ -55,30 +57,42 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
 
 class VisionEncoder:
 
-    def __init__(self, device='cuda'):
+    def __init__(self, s1_type, device='cuda'):
+        from internnav.model.utils.misc import set_random_seed
+        set_random_seed(0)
+
         self.device = device
 
-        vit_path = 'checkpoints/Qwen2_5_VisionTransformer/vit_from_dual_vln.ckpt'
-        config_path = 'checkpoints/Qwen2_5_VisionTransformer/config.json'
-        config = json.load(open(config_path, 'r'))
-
         model_dir = 'checkpoints/Qwen2_5_VisionTransformer'
+        if "navdp" in s1_type:  
+            vit_path = os.path.join(model_dir, 'vit_from_navdp_vln.ckpt')
+        elif "nextdit" in s1_type:
+            vit_path = os.path.join(model_dir, 'vit_from_dual_vln.ckpt')
+        else:
+            raise ValueError(f"Unsupported System 1 type: {s1_type}")
 
+        config_path = os.path.join(model_dir, 'config.json')
+        config = json.load(open(config_path, 'r'))
         vision_config = config.get("vision_config", None)
         vision_config = Qwen2_5_VLVisionConfig(**vision_config)
         self.vit_model = Qwen2_5_VisionTransformerPretrainedModel._from_config(vision_config, 
                                                                                attn_implementation="flash_attention_2")
         self.vit_model.load_state_dict(torch.load(vit_path, map_location="cpu"), strict=True)
-        self.vit_model.to(device=self.device, dtype=torch.bfloat16)
+        self.vit_model.to(device=self.device, dtype=torch.float16).eval()
 
         tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
         self.processor = AutoProcessor.from_pretrained(model_dir)
         self.processor.tokenizer = tokenizer
         self.processor.tokenizer.padding_side = 'left'
 
-    def get_patch_importance(self, image: np.ndarray):
-        text = self.processor.apply_chat_template([""], tokenize=False, add_generation_prompt=True)
-        image = Image.fromarray(image)
+    def get_patch_importance(self, image, text=""):
+        start_time = time.time()
+        text = self.processor.apply_chat_template([text], tokenize=False, add_generation_prompt=True)
+
+        # NEW: 压分辨率，加速vit推理
+        # w, h = image.size
+        # image = image.resize((w//2, h//2))
+
         inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
 
         image_grid_thw = inputs.get('image_grid_thw')
@@ -87,21 +101,39 @@ class VisionEncoder:
 
         with torch.no_grad():
             merger_outputs, outputs = self.vit_model(pixel_values, image_grid_thw)
-        merger_scale = math.sqrt(outputs.shape[0] / merger_outputs.shape[0])
 
-        h_grid, w_grid = int(h_grid / merger_scale), int(w_grid / merger_scale)
+        merge_scale = math.sqrt(outputs.shape[0] / merger_outputs.shape[0])
+        h_grid, w_grid = int(h_grid / merge_scale), int(w_grid / merge_scale)
+        
         patch_importance = torch.norm(merger_outputs, dim=-1)
-        patch_importance = patch_importance / patch_importance.max() # 归一化到0-1
+        patch_importance = patch_importance / patch_importance.sum() # 归一化到0-1
         patch_importance = patch_importance.reshape(h_grid, w_grid)
-        patch_importance = patch_importance.cpu().to(dtype=torch.float32).numpy()
 
-        return patch_importance
+        return time.time() - start_time, patch_importance
 
 
-def draw_heatmap_on_image(image, importance_map):
+def draw_origin_image(image: np.array, pixel=None, suffix=''):
+    if pixel is not None:
+        image = cv2.putText(
+            image,
+            f"{pixel[1]}, {pixel[0]}",
+            (50, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2,
+        )
+        image = cv2.circle(image, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
+
+    cv2.imwrite(f'logs/test_data/origin_image_{time.time()}{suffix}.png', image)  # 保存原始图像以供对比
+
+
+def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix=''):
     # importance_map: (h_grid, w_grid)，值在0-1之间
-    # h_grid, w_grid = importance_map.shape
     h_img, w_img, _ = image.shape
+
+    importance_map = importance_map / importance_map.max()
+    importance_map = importance_map.cpu().to(dtype=torch.float32).numpy() # 转为numpy数组，方便后续处理
 
     # 将 importance_map 放大到图像尺寸
     heatmap = cv2.resize(importance_map, (w_img, h_img), interpolation=cv2.INTER_LINEAR)
@@ -113,8 +145,20 @@ def draw_heatmap_on_image(image, importance_map):
     alpha = 0.5
     overlayed_image = cv2.addWeighted(image, 1 - alpha, heatmap_color, alpha, 0)
 
-    cv2.imwrite(f'logs/test_data/heatmap_overlay_{time.time()}.jpg', overlayed_image)  # 保存叠加后的图像以供对比
+    if pixel is not None:
+        overlayed_image = cv2.putText(
+            overlayed_image,
+            f"{pixel[1]}, {pixel[0]}",
+            (50, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 128, 0),
+            2,
+        )
+        overlayed_image = cv2.circle(overlayed_image, (pixel[1], pixel[0]), 5, (0, 128, 0), -1)
 
+    # cv2.imwrite(f'logs/test_data/episode_{episode}/heatmap_overlay_{time.time()}{suffix}.png', overlayed_image)  # 保存叠加后的图像以供对比
+    cv2.imwrite(f"./heatmap_overlay_{time.time()}{suffix}.png", overlayed_image)  # 保存叠加后的图像以供对比
 
 def generate_mask(shape, zero_ratio=0.01):
     """
@@ -136,7 +180,7 @@ def generate_mask(shape, zero_ratio=0.01):
     return arr.reshape(shape)
 
 
-def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=4):
+def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=2):
     """
     image: (H, W, C) 的 numpy 数组
     patch_size: 每个 patch 的大小，例如 14
@@ -164,37 +208,26 @@ def numpy_compression_v2(image: np.array, patch_size=28, compression_factor=4):
     return compressed_data
 
 
-def numpy_compression(image, importance, keep_ratio=0.01):
-    """
-    image_np: (C, H, W) 的 numpy 数组
-    attn_map: (h, w) 的注意力热力图，与 patch 数量对应
-    threshold: 低于此阈值的区域将被压缩
-    """
-
-    # cv2.imwrite('original_image.jpg', image)  # 保存原始图像以供对比
+def random_compression(image: np.array, importance, keep_ratio=0.1, compression_factor=4):
     H, W, _ = image.shape
-    patch_size = 100 # H // importance.shape[0] # 28
+    patch_size = H // importance.shape[0] # 28
 
     threshold = np.percentile(importance, (1 - keep_ratio) * 100)  # 根据百分位数动态确定阈值
-    
-    # 1. 标识低兴趣区域 (Low Interest Mask)
-    # mask = (importance < threshold)
-    # import pdb; pdb.set_trace()
-    # mask = np.random
-    # mask = generate_mask(importance.shape, zero_ratio=0.01)
-    new_H, new_W = H // patch_size + 1, W // patch_size + 1
-    # mask = generate_mask((new_H, new_W), zero_ratio=0.01)
-    
-    # 2. 分离数据：我们将图像切分为 Patch 列表
-    # 重要区域保留原始 patch，不重要区域进行池化
+    mask = (importance < threshold)
+    mask_number = np.sum(mask) # 置1的元素数量，也就是需要压缩的patch数量
+
+    total_num = mask.shape[0] * mask.shape[1]
+    mat = np.zeros(total_num)
+    idx = np.random.choice(total_num, mask_number, replace=False)
+    mat[idx] = 1
+
+    rand_mask = mat.reshape(mask.shape)
+
     compressed_data = []
     metadata = [] # 记录位置信息用于还原
     
-    idx = 0
-    # for i in range(importance.shape[0]):
-    #     for j in range(importance.shape[1]):
-    for i in range(new_H):
-        for j in range(new_W):
+    for i in range(importance.shape[0]):
+        for j in range(importance.shape[1]):
             # 获取当前 patch 的像素范围
             y1, y2 = i * patch_size, (i + 1) * patch_size
             x1, x2 = j * patch_size, (j + 1) * patch_size
@@ -202,180 +235,51 @@ def numpy_compression(image, importance, keep_ratio=0.01):
             x2 = min(x2, W)
             patch = image[y1:y2, x1:x2, :]
             
-            # if mask[i, j]:
-            #     # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
-            #     compressed_patch = cv2.resize(patch, (patch_size//4, patch_size//4), 
-            #                                   interpolation=cv2.INTER_AREA)
-            #     compressed_data.append(compressed_patch)
-            #     metadata.append(0) # 标记为压缩
-            # else:
-            #     compressed_data.append(patch)
-            #     metadata.append(1) # 标记为原始
-
-            compressed_patch = cv2.resize(patch, (patch_size//8, patch_size//8), 
+            if rand_mask[i, j]:
+                # 对低关注度 patch 进行 2x2 平均池化，体积减少 4 倍
+                compressed_patch = cv2.resize(patch, 
+                                              (patch_size//compression_factor, patch_size//compression_factor), 
                                               interpolation=cv2.INTER_AREA)
-            compressed_data.append(compressed_patch)
+                compressed_data.append(compressed_patch)
+                metadata.append(0) # 标记为压缩
+            else:
+                compressed_data.append(patch)
+                metadata.append(1) # 标记为原始
     
     return compressed_data, metadata
 
 
-def adaptive_compression_v2(image, patch_importance, threshold=0.1):
-    """
-    通过对非重要区域进行强模糊来减小文件体积，同时 100% 保留重要区域
-    """
-    h, w, c = image.shape
-    
-    # 1. 将 Patch Importance 转换为二值掩码 (0 或 1)
-    # 只有重要性大于阈值的 patch 才设为 1
-    threshold = np.percentile(patch_importance, (1 - threshold) * 100)  # 根据百分位数动态确定阈值
-    binary_patch_mask = (patch_importance >= threshold).astype(np.float32)
-    
-    # 2. 将掩码放大到原图尺寸
-    # 使用 cv2.INTER_NEAREST 保证 Patch 边缘清晰，不产生中间值
-    mask = cv2.resize(binary_patch_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-    mask = np.stack([mask] * 3, axis=-1)
-    
-    # 3. 对全图进行强力模糊（这是压缩体积的关键）
-    # 模糊程度越高，非重要区域的熵越低，压缩后的 buffer 越小
-    low_quality_area = cv2.GaussianBlur(image, (51, 51), 4)
-    
-    # 4. 硬合成：重要区域 100% 像素保留，非重要区域 100% 模糊
-    # final = 原图(重要部分) + 模糊图(非重要部分)
-    final_img = (image * mask + low_quality_area * (1 - mask)).astype(np.uint8)
-    
-    return final_img
-
-
-def compress_image_by_patch(image, patch_importance, 
-                            thresholds=(0.12, 0.08), 
-                            patch_size=14, 
-                            quality_levels=None):
-    """
-    根据 Patch 重要性对图像进行局部压缩
-    :param image: 输入图像 (H, W, 3)
-    :param patch_importance: 重要性矩阵 (h_patches, w_patches)，值通常在 [0, 1]
-    :param patch_size: ViT 的 patch 大小
-    :param quality_levels: 字典，定义重要性区间对应的 JPEG 质量 (0-100)
-    :return: 压缩后的图像
-    """
-    if quality_levels is None:
-        # 默认分三档：高、中、低重要性
-        quality_levels = {
-            'high': 90,   # 重要性 > 0.7
-            'medium': 50, # 0.3 <= 重要性 <= 0.7
-            'low': 10     # 重要性 < 0.3
-        }
-
-    h, w, c = image.shape
-    h_patches, w_patches = patch_importance.shape
-    
-    # 创建一个空的目标图像
-    compressed_img = np.zeros_like(image)
-
-    for i in range(h_patches):
-        for j in range(w_patches):
-            # 1. 确定当前 patch 的像素坐标范围
-            y1, y2 = i * patch_size, (i + 1) * patch_size
-            x1, x2 = j * patch_size, (j + 1) * patch_size
-
-            x2 = min(x2, w)
-            y2 = min(y2, h)  # 防止越界
-            
-            patch = image[y1:y2, x1:x2]
-            score = patch_importance[i, j]
-
-            # 2. 根据得分确定压缩质量系数
-            if score > thresholds[0]:
-                q = quality_levels['high']
-            elif score > thresholds[1]:
-                q = quality_levels['medium']
-            else:
-                q = quality_levels['low']
-
-            # 3. 对单个 Patch 执行压缩/解压模拟 (JPEG 压缩)
-            # 注意：实际存储时需特殊格式，此处代码演示的是“质量损失”的效果
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), q]
-            _, encimg = cv2.imencode('.jpg', patch, encode_param)
-            decimg = cv2.imdecode(encimg, 1)
-
-            # 4. 放回原位置
-            compressed_img[y1:y2, x1:x2] = decimg
-
-    return compressed_img
-
-
-def verify_communication_reduction(original_img, processed_img, quality=90):
-    # 将图像编码为内存缓冲区，模拟网络传输的数据流
-    _, buffer_orig = cv2.imencode('.jpg', original_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    _, buffer_proc = cv2.imencode('.jpg', processed_img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-    
-    size_orig = len(buffer_orig) / 1024  # KB
-    size_proc = len(buffer_proc) / 1024  # KB
-    reduction = (1 - size_proc / size_orig) * 100
-    
-    print(f"原始通信量: {size_orig:.2f} KB")
-    print(f"处理后通信量: {size_proc:.2f} KB")
-    print(f"通信量减少了: {reduction:.2f}%")
-    
-    return size_orig, size_proc
-
-
-def solve(thresholds, data_sizes):
-    from scipy.optimize import curve_fit
-
-    # 线性拟合
-    thresholds = thresholds.reshape(-1, 1)  # 转换为二维数组
-    data_sizes = data_sizes.reshape(-1, 1)
-
-    # 2. 定义拟合函数
-    def quadratic_func(x, a, b, c):
-        return a * x**2 + b * x + c
-
-    model = LinearRegression()
-    model.fit(thresholds, data_sizes)
-
-    k = model.coef_[0][0]
-    b = model.intercept_[0]
-
-    print(f"拟合方程: Size = {k:.2f} * Threshold + {b:.2f}")
-    print(f"相关系数 (R²): {model.score(thresholds, data_sizes):.4f}")
-
-    return model
-
-
 if __name__ == "__main__":
     import os
+    os.environ["TRITON_PTXAS_PATH"]="/usr/local/cuda-12.6/bin/ptxas"
+
     import time
 
-    image_path = '/home/smc/projects/InternNav/data/preview/vln_ce/traj_data/r2r/1LXtFkjw3qL/000087/videos/chunk-000/observation.images.rgb'
-    records = []
-    total_thresholds = []
-    thresholds = np.arange(0.1, 1.0, 0.05)
+    image_path = 'image.png'
+    vision_encoder = VisionEncoder("navdp_async")
+    vision_encoder.vit_model.eval()
 
-    vision_encoder = VisionEncoder()
+    image = Image.open(image_path)
 
-    for img_file in os.listdir(image_path):
-        if not img_file.endswith('.jpg'):
-            continue
-        
-        image_file_path = os.path.join(image_path, img_file)
-        image = Image.open(image_file_path)
+    # W, H = image.size
+    # resize_image = image.resize((384, 384))
+    # resize_image.save('resized_image.jpg')  # 保存缩放后的图像以供对比
 
-        patch_importance = vision_encoder.get_patch_importance(np.array(image))
-        import pdb; pdb.set_trace()
+    _, patch_importance = vision_encoder.get_patch_importance(np.array(image))
+    draw_heatmap_on_image(np.array(image), patch_importance, suffix='_original')
 
-        start_time = time.time()
+    # start_time = time.time()
+    # _, patch_importance = vision_encoder.get_patch_importance(np.array(image))
+    # end_time = time.time()
+    # print(f"Original image processing time: {end_time - start_time:.4f} seconds")
+    # draw_heatmap_on_image(np.array(image), patch_importance, suffix='_original')
 
-        records = []
-        for threshold in thresholds:
-            compressed_img = adaptive_compression_v2(np.array(image), patch_importance, threshold=threshold)
-            _, compressed_buffer = cv2.imencode('.jpg', compressed_img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            records.append(len(compressed_buffer))
-            total_thresholds.append(threshold)
+    # start_time = time.time()
+    # _, patch_importance_resized = vision_encoder.get_patch_importance(np.array(resize_image))
+    # # patch_importance_resized = cv2.resize(patch_importance_resized, (patch_importance.shape[1], patch_importance.shape[0]), interpolation=cv2.INTER_LINEAR)
+    # print(f"Resized image processing time: {time.time() - end_time:.4f} seconds")
+    # draw_heatmap_on_image(np.array(image), patch_importance_resized, suffix='_resized')
 
-        liner_model = solve(np.array(thresholds), np.array(records))
-        
-        end_time = time.time()
-        print(f"处理 {img_file} 耗时: {end_time - start_time:.2f} 秒")
+       
 
        

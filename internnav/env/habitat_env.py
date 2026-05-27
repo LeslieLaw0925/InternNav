@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Any, Dict, List, Optional
+import random
 
 from internnav.configs.evaluator import EnvCfg, TaskCfg
 from internnav.env import base
@@ -37,6 +38,9 @@ class HabitatEnv(base.Env):
 
         # generate episodes
         self.episodes = self.generate_episodes()
+        self.episodes = [ep for ep in self.episodes if "en" in ep.instruction.language]
+        random.seed(0)
+        self.episodes = random.sample(self.episodes, 500)[:300]
 
     def generate_episodes(self) -> List[Any]:
         """
