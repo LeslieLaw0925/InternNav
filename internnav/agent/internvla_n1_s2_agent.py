@@ -23,42 +23,6 @@ DEFAULT_IMAGE_TOKEN = "<image>"
 TROCH_DTYPE = torch.bfloat16
 
 
-def init_swir_model(device):
-    from internnav.agent.swin_ir.network_swinir import SwinIR as net
-
-    model = net(upscale=1, in_chans=3, img_size=128, window_size=8,
-                img_range=1., depths=[6, 6, 6, 6, 6, 6], embed_dim=180, num_heads=[6, 6, 6, 6, 6, 6],
-                mlp_ratio=2, upsampler='', resi_connection='1conv')
-    param_key_g = 'params'
-    
-    model_path = 'checkpoints/005_colorDN_DFWB_s128w8_SwinIR-M_noise50.pth'
-    pretrained_model = torch.load(model_path)
-    model.load_state_dict(pretrained_model[param_key_g] if param_key_g in pretrained_model.keys() else pretrained_model, strict=True)
-    model.eval()
-    model = model.to(device)
-    return model
-
-
-def init_realgan_model():
-    from realesrgan import RealESRGANer
-    from basicsr.archs.rrdbnet_arch import RRDBNet
-
-    model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=6, num_grow_ch=32, scale=4)
-    netscale = 4
-
-    # restorer
-    upsampler = RealESRGANer(
-        scale=netscale,
-        model_path='checkpoints/RealESRGAN_x4plus_anime_6B.pth',
-        model=model,
-        tile=400,
-        tile_pad=10,
-        pre_pad=0,
-        half=True,
-        )
-    
-    return upsampler
-
 @Agent.register('internvla_n1_cloud')
 class CloudAgent(Agent):
     def __init__(self, config: AgentCfg):
@@ -67,7 +31,6 @@ class CloudAgent(Agent):
         _model_settings = ModelCfg(**vln_sensor_config)
         self.s2_agent = System2(_model_settings)
         self.device = torch.device(_model_settings.device)
-        # self.img_enchanced_model = init_realgan_model()
 
         self.action_seq: list = []
         self.last_action: int = -1

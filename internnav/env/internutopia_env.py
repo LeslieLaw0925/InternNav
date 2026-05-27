@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import Any, Dict, List
+import random
 
 from internnav.configs.evaluator import EnvCfg, TaskCfg
 from internnav.env import base
@@ -37,9 +38,8 @@ class InternutopiaEnv(base.Env):
             world_size=env_settings['world_size']
         )
         self.episodes = generate_vln_episode(self.episode_loader, task_config)
-        # import random
-        # random.seed(0)
-        # self.episodes = random.sample(self.episodes, 20)
+        random.seed(0)
+        self.episodes = random.sample(self.episodes, 500)
         if len(self.episodes) == 0:
             print("No episodes found for the given configuration.")
             sys.exit(0)
