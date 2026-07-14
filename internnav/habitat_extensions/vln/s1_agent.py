@@ -11,15 +11,16 @@ from internnav.configs.agent import NewAgentCfg
 from internnav.model.utils.vln_utils import traj_to_actions
 from internnav.model.basemodel.internvla_n1.internvla_n1_arch import AsyncInternVLAN1MetaModel
 from internnav.utils.common_log_util import common_logger as log
+# from internnav.utils.common_log_util import init as log_init
 from internnav.utils.comm_utils.client_utils import find_optimal_config
 from internnav.model.utils.misc import set_random_seed
 
+# log_init()
 
 MAX_STEPS = 8
 MAX_LOCAL_STEPS = 4
 
 
-@Agent.register('habitat_s1_agent')
 class System1(Agent):
     def __init__(self, config: NewAgentCfg):
         super().__init__(config)
@@ -102,7 +103,7 @@ class System1(Agent):
 
         if not all([self.pixel_goal_rgb is not None, 
                     self.traj_latents is not None]):
-            raise ValueError("Missing required observation for System1 step.")
+            raise ValueError(f"Missing required observation for System1 step. Trajectory latents are {self.traj_latents}.")
         
         image_dp = torch.tensor(np.array(look_down_image.resize((224, 224)))).to(self.dtype) / 255
         images_dp = torch.stack([self.pixel_goal_rgb, image_dp]).unsqueeze(0).to(self.device)
@@ -118,7 +119,7 @@ class System1(Agent):
                                       num_inference_steps=config.get('infer_step'),
                                       num_sample_trajs=config.get('traj_num'))
 
-        action_list, _ = traj_to_actions(dp_actions)
+        action_list = traj_to_actions(dp_actions)
         if len(action_list) < MAX_STEPS:
             action_list += [0] * (MAX_STEPS - len(action_list))
 

@@ -3,9 +3,26 @@ from internnav.configs.evaluator import EnvCfg, EvalCfg
 
 eval_cfg = EvalCfg(
     agent=NewAgentCfg(
-        model_name='habitat_s1_agent',
-        local_server_port=8023,
-        model_settings={},
+        model_name='internvla_n1',
+        ckpt_path='',
+        model_settings={
+            "mode": "dual_system",  # inference mode: dual_system or system2
+            "model_path": "checkpoints/InternVLA-N1-w-NavDP",
+            # "model_path": "checkpoints/InternVLA-N1-DualVLN", 
+            's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
+            'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
+            'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
+            'adaptive_compression': False,
+            'adaptive_speedup': False,
+            "num_history": 8,
+            "resize_w": 384,  # image resize width
+            "resize_h": 384,  # image resize height
+            'width': 640,
+            'height': 480,
+            "max_new_tokens": 1024,  # maximum number of tokens for generation
+            "vis_debug": False,  # If vis_debug=True, save debug videos per episode
+            "vis_debug_path": "./logs/habitat/vis_debug",
+        },
     ),
     env=EnvCfg(
         env_type='habitat',
@@ -14,7 +31,7 @@ eval_cfg = EvalCfg(
             'config_path': 'scripts/eval/configs/vln_r2r.yaml',
         },
     ),
-    eval_type='habitat_vln',
+    eval_type='robust_habitat_vln',
     eval_settings={
         # all current parse args
         "output_path": "./logs/habitat/test_dual_system",  # output directory for logs/results

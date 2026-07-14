@@ -3,7 +3,7 @@ import base64
 import multiprocessing
 import pickle
 from typing import Any, Dict, List
-from time import time
+from time import time, sleep
 import os
 
 import uvicorn
@@ -76,7 +76,6 @@ class IssacAgentServer:
 
         self.set_adaptive_compression = vln_sensor_config.get('adaptive_compression', False)
         self.if_compressed = False
-        # import pdb; pdb.set_trace()
         self.episode = 0
         os.makedirs(f"logs/test_data/episode_{self.episode}", exist_ok=True)
         
@@ -119,10 +118,9 @@ class IssacAgentServer:
         return self.preprocess_obs(obs)
 
     def switch_stage(self):
-        force_s2 = (self.forward_step_num > self.PLAN_STEP_GAP) and len(self.s1_agent.action_list) == 0
-
-        stage = 's2' if force_s2 else 's1'
-        return stage
+        force_s2 = (self.forward_step_num > self.PLAN_STEP_GAP) \
+            and len(self.s1_agent.action_list) == 0
+        return  "s2" if force_s2 else "s1"
     
     def _request_s2(self, obs: List[Dict[str, Any]], start_time: float):
         origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
@@ -130,12 +128,11 @@ class IssacAgentServer:
         if self.set_adaptive_compression:
             # Estimate cloud latency
             estimated_cloud_time = self.estimate_cloud_latency(len(serialize_obs(obs)))
-            preprocess_time = time() - start_time
             self.if_compressed = (estimated_cloud_time is not None) and \
-                ((estimated_cloud_time + preprocess_time) > self.cloud_latency_threshold)
+                (estimated_cloud_time > self.cloud_latency_threshold)
             log.info(f"Image compression needed: {self.if_compressed}")
 
-        response_data = self._transmit_obs(obs, start_time) # transmit the continuous observations to the server and get the response for system2
+        response_data = self._transmit_obs(obs) # transmit the continuous observations to the server and get the response for system2
         cloud_data: dict = response_data['action'][0]
         traj_latents = cloud_data.get('traj_latents', None)
 
@@ -156,14 +153,13 @@ class IssacAgentServer:
         
         return response_data
     
-    def _transmit_obs(self, obs: List[Dict[str, Any]], start_time: float):
+    def _transmit_obs(self, obs: List[Dict[str, Any]]):
         origin_upload_size = None
         if self.if_compressed:
             image = obs[0]['rgb']
             vit_latency, patch_importance = self.vision_encoder.get_patch_importance(image)
             log.info(f"[TIME] ViT inference latency: {vit_latency:.4f}s")
-            preprocess_time = time() - start_time
-            time_constraint = self.cloud_latency_threshold - vit_latency - preprocess_time
+            time_constraint = self.cloud_latency_threshold - vit_latency
             log.info(f"[CONSTRAINT] Remaining time constraint for image transmission: {time_constraint:.4f} seconds.")
             p_star = solve_optimal_patch_ratio(image,
                                                time_constraint,
@@ -221,32 +217,37 @@ class IssacAgentServer:
 
         obs[0]['stage'] = self.current_stage  # Add current stage information to the observation
         if self.current_stage == 's2':
-            self.forward_step_num = 0            
+            self.forward_step_num = 0
             response_data = self._request_s2(obs, start_time)
         else:
-            origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
-
-            if self.set_adaptive_compression:
-                # Estimate transmission latency
-                estimated_transmission_time = self.cal_transmission_time(len(serialize_obs(obs)))
-                preprocess_time = time() - start_time
-                self.if_compressed = (estimated_transmission_time is not None) and \
-                    ((estimated_transmission_time + preprocess_time) > self.cloud_latency_threshold)
-                log.info(f"Image compression needed: {self.if_compressed}")
-
-            self._transmit_obs(obs, start_time) # transmit the continuous observations to the server
-
-            obs[0]['rgb'] = origin_rgb # restore 
-            obs[0]['depth'] = depth # restore 
-            preprocess_time = time() - start_time
-            obs[0]['latency_constraint'] = self.e2e_latency_threshold - preprocess_time
-            response_data = self.s1_agent.step(obs[0])
+            response_data = self._request_normal_s1(obs, start_time)
             
-            self.forward_step_num += 1
-
         self.inference_logger.record_by_key(system_perf.STEP, time() - start_time)
         self.inference_logger.flush()
 
+        return response_data
+
+    def _request_normal_s1(self, obs: List[Dict[str, Any]], start_time: float):
+        origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
+
+        if self.set_adaptive_compression:
+            # Estimate transmission latency
+            estimated_transmission_time = self.cal_transmission_time(len(serialize_obs(obs)))
+            self.if_compressed = (estimated_transmission_time is not None) and \
+                (estimated_transmission_time > self.cloud_latency_threshold)
+            log.info(f"Image compression needed: {self.if_compressed}")
+
+        # Transmit the continuous observations to the edge server
+        self._transmit_obs(obs)
+       
+        obs[0]['rgb'] = origin_rgb # restore
+        obs[0]['depth'] = depth # restore 
+        preprocess_time = time() - start_time
+        obs[0]['latency_constraint'] = self.e2e_latency_threshold - preprocess_time
+        response_data = self.s1_agent.step(obs[0])
+        
+        self.forward_step_num += 1
+        
         return response_data
 
     async def reset_agent(self, agent_name: str, request: ResetRequest):
@@ -261,7 +262,7 @@ class IssacAgentServer:
 
         reset_index = getattr(request, 'reset_index', None)
         self.s1_agent.reset(reset_index)
-
+        
         self.current_stage = 's2'  # Reset to initial stage after reset
         self.forward_step_num = 0
         self.episode += 1
@@ -275,7 +276,6 @@ class IssacAgentServer:
         if estimate_transmission_time is None:
             return
         
-        # max_s2_inference_time = self.infer_profile_data['s2_infer']['max_inference_time']
         return estimate_transmission_time
 
     def cal_transmission_time(self, upload_size_bytes):

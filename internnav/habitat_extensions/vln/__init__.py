@@ -1,2 +1,3 @@
-# from internnav.habitat_extensions.vln.habitat_vln_evaluator import HabitatVLNEvaluator
-# from internnav.habitat_extensions.vln.s1_agent import System1
+from internnav.habitat_extensions.vln.habitat_vln_evaluator import HabitatVLNEvaluator
+from internnav.habitat_extensions.vln.dist_habitat_vln_evaluator import DistributedHabitatVLNEvaluator
+from internnav.habitat_extensions.vln.robust_habitat_vln_evaluator import RobustHabitatVLNEvaluator

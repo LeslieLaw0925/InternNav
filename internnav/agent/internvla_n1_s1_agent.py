@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-import torch.nn.functional as F
+# import torch.nn.functional as F
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from diffusers.utils.torch_utils import randn_tensor
 
@@ -96,10 +96,8 @@ class System1:
                                                   self.infer_step_range,
                                                   self.traj_num_range)
         else:
-        #     best_config = {'infer_step': self.infer_step_range[-1],
-        #                    'traj_num': self.traj_num_range[-1]}
-            best_config = {'infer_step': 14,
-                           'traj_num': 24}
+            best_config = {'infer_step': self.infer_step_range[-1],
+                           'traj_num': self.traj_num_range[-1]}
         log.info(f"Chosen config for System1 inference: {best_config}")
 
         return self.s1_infer(obs, best_config, start_time)
@@ -141,10 +139,8 @@ class System1:
                                         num_sample_trajs=config['traj_num'])
         log.info(f"[TIME] On-device system1 step time: {time.time() - start_time:.4f} seconds.")
                 
-        action_list, traj_var = traj_to_actions(dp_actions)
+        action_list = traj_to_actions(dp_actions)
         action_list = [x for x in action_list if x != 0]
-
-        log.info(f"Trajectory variance: {traj_var:.4f}.")
 
         if action_list == []:
             action_list = [-1]
@@ -265,7 +261,7 @@ class System1:
             # compute previous: x_t -> x_t-1
             latents = scheduler.step(noise_pred, t, latents).prev_sample
         return latents.detach()
-    
+
     def reset(self, reset_index=None):
         self.action_list = []
         self.pixel_goal_rgb = None

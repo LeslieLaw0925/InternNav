@@ -14,7 +14,7 @@ from transformers import (
     AutoTokenizer,
 )
 
-# from internnav.utils.common_log_util import common_logger as log
+from internnav.utils.common_log_util import common_logger as log
 
 
 class Qwen2_5_VLVisionConfig(PretrainedConfig):
@@ -58,8 +58,8 @@ class Qwen2_5_VLVisionConfig(PretrainedConfig):
 class VisionEncoder:
 
     def __init__(self, s1_type, device='cuda'):
-        # from internnav.model.utils.misc import set_random_seed
-        # set_random_seed(0)
+        from internnav.model.utils.misc import set_random_seed
+        set_random_seed(0)
 
         self.device = device
 
@@ -85,10 +85,11 @@ class VisionEncoder:
         self.processor.tokenizer = tokenizer
         self.processor.tokenizer.padding_side = 'left'
 
-    def get_patch_importance(self, image: np.ndarray, text=""):
+    def get_patch_importance(self, image, text=""):
         start_time = time.time()
         text = self.processor.apply_chat_template([text], tokenize=False, add_generation_prompt=True)
-        image = Image.fromarray(image)
+        if isinstance(image, np.ndarray):
+            image = Image.fromarray(image)
 
         # NEW: 压分辨率，加速vit推理
         w, h = image.size

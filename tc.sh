@@ -3,7 +3,7 @@
 # --- 配置區 ---
 IFACE="eno1"        # 你的網卡名稱
 TRACE_FILE="4g_trace.txt"
-INTERVAL=100          # 每筆數據的切換間隔（秒）
+INTERVAL=10          # 每筆數據的切換間隔（秒）
 # --------------
 
 if [[ ! -f "$TRACE_FILE" ]]; then
@@ -25,18 +25,24 @@ start_replay() {
     # burst 建議根據最大頻寬調整，這裡設為 32k
     tc qdisc add dev $IFACE root handle 1: tbf rate 20mbit burst 32k latency 400ms
 
-    # 按行讀取頻寬數據
-    COUNT=0
-    while IFS= read -r BW; do
-        ((COUNT++))
-        # 實時修改頻寬限制
-        tc qdisc change dev $IFACE root handle 1: tbf rate ${BW}mbit burst 32k latency 400ms
+    ROUND=0
+    while true; do
+        ((ROUND++))
+        echo -e "\n🔄 开始第 ${ROUND} 轮回放"
         
-        echo -ne "网络数据_${COUNT} | 当前带宽: ${BW} Mbps   \r"
-        
-        sleep $INTERVAL
-    done < "$TRACE_FILE"
-
+        # 按行讀取頻寬數據
+        COUNT=0
+        while IFS= read -r BW; do
+            ((COUNT++))
+            # 實時修改頻寬限制
+            tc qdisc change dev $IFACE root handle 1: tbf rate ${BW}mbit burst 32k latency 400ms
+            
+            echo -ne "网络数据_${COUNT} | 当前带宽: ${BW} Mbps   \r"
+            
+            sleep $INTERVAL
+        done < "$TRACE_FILE"
+    done
+    
     echo -e "\n✅ 网络数据回放结束。"
     stop_limit
 }
