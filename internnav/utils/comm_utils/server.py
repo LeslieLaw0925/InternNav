@@ -2,6 +2,7 @@
 import base64
 import multiprocessing
 import pickle
+from time import time
 from typing import Dict
 
 import uvicorn
@@ -30,6 +31,7 @@ class AgentServer:
             ('/init', self.init_agent, ['POST'], status.HTTP_201_CREATED),
             ('/{agent_name}/step', self.step_agent, ['POST'], None),
             ('/{agent_name}/reset', self.reset_agent, ['POST'], None),
+            ('/heartbeat', self.heartbeat_check, ['GET'], status.HTTP_200_OK),
             # TODO: Add stop server route
         ]
 
@@ -47,7 +49,10 @@ class AgentServer:
         agent_name = agent_config.model_name
         self.agent_instances[agent_name] = agent
         return {'status': 'success', 'agent_name': agent_name}
-
+    
+    async def heartbeat_check(self):
+        return {"status": "OK", "timestamp": time()}
+    
     async def step_agent(self, agent_name: str, request: StepRequest):
         self._validate_agent_exists(agent_name)
         agent = self.agent_instances[agent_name]
