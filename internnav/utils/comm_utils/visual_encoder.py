@@ -90,8 +90,8 @@ class VisionEncoder:
         text = self.processor.apply_chat_template([text], tokenize=False, add_generation_prompt=True)
 
         # NEW: 压分辨率，加速vit推理
-        # w, h = image.size
-        # image = image.resize((w//2, h//2))
+        w, h = image.size
+        image = image.resize((w//2, h//2))
 
         inputs = self.processor(text=[text], images=[image], return_tensors="pt").to(self.device)
 

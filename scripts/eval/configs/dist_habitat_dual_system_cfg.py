@@ -12,8 +12,8 @@ eval_cfg = EvalCfg(
             's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
             'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
             'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
-            'adaptive_compression': True,
-            'adaptive_speedup': True,
+            'adaptive_compression': False,
+            'adaptive_speedup': False,
             "num_history": 8,
             "resize_w": 384,  # image resize width
             "resize_h": 384,  # image resize height
