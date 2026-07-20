@@ -130,7 +130,10 @@ class CloudAgent(Agent):
 
         obs = obs[0]  # do not support batch_env currently?
         is_compressed = obs.get('compressed', 0)
-        rgb = self.restore_img_by_patch(obs['rgb']) if is_compressed else obs['rgb']
+        rgb: np.array = self.restore_img_by_patch(obs['rgb']) if is_compressed else obs['rgb']
+        if rgb.shape != (self.height, self.width, 3):
+            rgb = Image.fromarray(rgb).resize((self.width, self.height), Image.BILINEAR)
+            rgb = np.array(rgb)
         # if is_compressed:
         #     rgb = cv2.resize(obs['rgb'], (self.width, self.height), interpolation=cv2.INTER_LINEAR)
         
