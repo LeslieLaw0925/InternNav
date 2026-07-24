@@ -50,7 +50,7 @@ from internnav.utils.comm_utils.client_utils import serialize_obs, solve_optimal
 from internnav.utils.comm_utils.visual_encoder import VisionEncoder
 from internnav.habitat_extensions.vln.system_log import InferenceLogger
 from internnav.habitat_extensions.vln.s1_agent import System1
-from internnav.habitat_extensions.vln.network_monitor import EdgeMonitor
+from internnav.habitat_extensions.vln.e2e_binned import EndToEndBinnedSwapping
 
 # Import for Habitat registry side effects — do not remove
 import internnav.habitat_extensions.vln.measures  # noqa: F401 # isort: skip
@@ -82,8 +82,8 @@ class system_perf(enumerate):
     COMP_RATIO = 'comp_ratio'
 
 
-@Evaluator.register('robust_habitat_vln')
-class RobustHabitatVLNEvaluator(DistributedEvaluator):
+@Evaluator.register('e2e_binned_habitat_vln')
+class E2EBinnedHabitatVLNEvaluator(DistributedEvaluator):
     def __init__(self, cfg: EvalCfg):
         args = argparse.Namespace(**cfg.eval_settings)
         self.save_video = args.save_video
@@ -128,8 +128,8 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
         super().__init__(cfg, init_agent=False)
 
         self.s1_agent = System1(cfg.agent)
-        # self.s2_base_url = f"http://192.168.105.15:8023"
-        self.s2_base_url = f"http://192.168.105.11:30091"
+        self.s2_base_url = f"http://192.168.105.15:8023"
+        # self.s2_base_url = f"http://192.168.105.5:30814"
         self._init_agents(cfg.agent)
         self.ema_bandwidth = None
         with open('scripts/eval/configs/latency_profile.yaml', 'r', encoding='utf-8') as f:
@@ -137,18 +137,14 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
         self.cloud_latency_threshold = 0.5 # seconds
         self.e2e_latency_threshold = 1.5
 
-        # network monitor process
-        self.network_monitor = EdgeMonitor(
-            f"{self.s2_base_url}/agent/heartbeat",
-            interval=0.5)
-        self.network_monitor.start()
-
 # ------------------------------------- model ------------------------------------------
         self.model_args = argparse.Namespace(**cfg.agent.model_settings)
         self.vis_debug = bool(getattr(self.model_args, "vis_debug", False))
         self.vis_debug_path = getattr(self.model_args, "vis_debug_path", os.path.join(self.output_path, "vis_debug"))
         self.vision_encoder = VisionEncoder(self.model_args.s1_type)
-        self.set_adaptive_compression = bool(getattr(self.model_args, "adaptive_compression", False))
+        # For e2e_binned baseline
+        s1_type = cfg.agent.model_settings.get('s1_type')
+        self.e2e_binned_swapping = EndToEndBinnedSwapping(s1_type)
 
         self._camera_height = self.sim_sensors_config.rgb_sensor.position[1]
         self._min_depth = self.sim_sensors_config.depth_sensor.min_depth
@@ -174,19 +170,11 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
     
     def s2_agent_step(self, rgb, text=None, step_id=None, look_down=None):
         obs = {'rgb': rgb, 'instruction': text, 'step_id': step_id, 'look_down': look_down}
-        origin_size = None
-        if self.set_adaptive_compression:
-            # Estimate cloud latency
-            origin_size = len(serialize_obs(obs))
-            estimated_cloud_time = self.estimate_cloud_latency(origin_size)
-            if_compressed = (estimated_cloud_time is not None) and \
-                (estimated_cloud_time > self.cloud_latency_threshold)
-            if if_compressed:
-                compressed_img = self.compress_image(rgb)
-                if compressed_img is not None:
-                    obs['rgb'] = compressed_img
-                    obs['compressed'] = 1
+        origin_size = len(serialize_obs(obs))
 
+        compressed_img, self.current_s1_config = \
+            self.e2e_binned_swapping.execute_pipeline(rgb, self.ema_bandwidth)
+        obs['rgb'] = compressed_img
         upload_data = serialize_obs(obs)
 
         transmission_start_time = time.time()
@@ -211,93 +199,17 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
                                                 (origin_size - upload_data_size) / origin_size)
 
         self.update_bandwidth(upload_data_size, transmission_delay)
-
         return response_data
     
     def s1_agent_step(self, rgb, depth, habitat_time, traj_latents=None):
         s1_start_time = time.time()
         elasped_time = s1_start_time - self.step_start_time
         obs = {'rgb': rgb, 'depth': depth, 'traj_latents': traj_latents, 
-               'latency_constraint': self.e2e_latency_threshold - elasped_time + habitat_time}
+               'latency_constraint': self.e2e_latency_threshold - elasped_time + habitat_time,
+               'infer_config': self.current_s1_config}
         actions = self.s1_agent.step(obs)
         self.inference_logger.record_by_key(system_perf.S1, time.time() - s1_start_time)
         return actions
-    
-    def semantic_hold_infer(self, look_down_image, look_down_depth, habitat_time):
-        self.semantic_hold_steps += 1
-        k = self.semantic_hold_steps
-
-        # 1. 产生本地快模型（S1）离散候选动作
-        try:
-            s1_response = self.s1_agent_step(look_down_image, look_down_depth, habitat_time)
-            s1_candidate_action = s1_response['local_actions'][0]
-            print(f"[Semantic Hold] Local S1 inference during hold: candidate action {int(s1_candidate_action)}.")
-        except Exception as e:
-            print(f"[Semantic Hold] Local S1 inference failure during hold: {e}")
-            return -1
-
-        # 2. 计算风险项 A: 离散历史动作切换频率 (Volatility)
-        history_len = 5
-        recent_actions = self.action_history[-history_len:]
-        
-        action_volatility = 0.0
-        momentum_action = s1_candidate_action
-        if len(recent_actions) >= 2:
-            transitions = sum(1 for i in range(1, len(recent_actions)) if recent_actions[i] != recent_actions[i-1])
-            action_volatility = transitions / (len(recent_actions) - 1)  # 归一化到 [0, 1]
-            
-            # 提取动量行为：滑动历史窗口内的众数动作
-            counts = Counter(recent_actions)
-            momentum_action = counts.most_common(1)[0][0]
-            print(f"[Semantic Hold] Momentum action: {int(momentum_action)}.")
-
-        # 3. 计算风险项 B: 零算力开销视觉突变率 (Visual Shift)
-        visual_shift = 0.0
-        current_rgb = np.array(look_down_image)
-        if self.semantic_hold_last_rgb is not None:
-            diff = (current_rgb.astype(np.float32) - self.semantic_hold_last_rgb.astype(np.float32)) / 255.0
-            visual_shift = float(np.mean(diff ** 2) * 100)
-        self.semantic_hold_last_rgb = current_rgb
-
-        # 4. 融合综合风险判定自适应外推长度
-        w1, w2, w3 = 0.1, 1.0, 1.5  # 系统调优超参数
-        R_k = (w1 * k) + (w2 * action_volatility) + (w3 * visual_shift)
-        theta_safe = 1.0  # 安全动态硬截断阈值
-
-        if R_k < theta_safe:
-            # 处于安全包络线内：执行离散多数投票外推
-            alpha_k = max(0.0, 1.0 - 0.2 * k)
-            if alpha_k >= 0.5:
-                action = s1_candidate_action
-                log_msg = "S1 Candidate"
-            else:
-                action = momentum_action
-                log_msg = "Historical Momentum"
-            print(f"[Outage Extrapolation] R_k={R_k:.3f} < {theta_safe}. Mode: {log_msg}, Action: {int(action)}")
-        else:
-            # 超出安全包络线（断网过久或撞墙风险剧增）：自适应硬截断，强制刹车
-            action = -1
-            print(f"[Emergency Brake] Risk threshold exceeded! R_k={R_k:.3f} >= {theta_safe}. Action hard truncated to STOP.")
-        
-        return action
-    
-    def compress_image(self, image):
-        vit_latency, patch_importance = self.vision_encoder.get_patch_importance(image)
-        time_constraint = self.cloud_latency_threshold - vit_latency
-        print(f"Latency constraint for s2 transmission is {time_constraint}s.")
-        p_star = solve_optimal_patch_ratio(np.array(image),
-                                        time_constraint,
-                                        self.ema_bandwidth,
-                                        compression_factor=4)
-        if p_star < 1.0:
-            print(f"Compression ratio is {p_star}.")
-            compressed_img = numpy_compression_by_patch(np.array(image), 
-                                                    patch_importance, 
-                                                    keep_ratio=p_star, 
-                                                    compression_factor=4)
-            return compressed_img
-        
-        return None
 
     def estimate_cloud_latency(self, upload_size_bytes):
         estimate_transmission_time = self.cal_transmission_time(upload_size_bytes)
@@ -450,12 +362,6 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
             self.s1_agent.reset()
             self.s2_agent_reset()
 
-            # Reset for network outage settings
-            self.semantic_hold = False
-            self.semantic_hold_steps = 0
-            self.semantic_hold_last_rgb = None
-            self.action_history = []  # 用于跟踪离散动作序列的历史窗口
-
             # ---- episode meta (scene_id, episode_id, instruction) ----
             # we get it from the underlying habitat env
             episode = self.env.get_current_episode()
@@ -472,7 +378,6 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
 
             vis_frames = []
             step_id = 0
-            s2_step_num = 0
             vis_writer = None
 
             if self.save_video:
@@ -497,9 +402,6 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
             episode_start_time = time.time()
             # ---------- 2. Episode step loop -----------
             while (not done) and (step_id <= self.max_steps_per_episode):
-                self.semantic_hold_steps = 0
-                self.semantic_hold_last_rgb = None
-                
                 self.inference_logger.reset()
                 self.inference_logger.record_by_key(system_perf.EPISODE_ID, episode_id)
                 self.inference_logger.record_by_key(system_perf.STEP_ID, step_id)
@@ -518,6 +420,7 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
 
                 self.step_start_time = time.time()
                 habitat_time = 0
+                self.current_s1_config = None
 
                 if action == action_code.LOOKDOWN:
                     look_down_image = image
@@ -532,16 +435,7 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
                     look_down_depth = torch.as_tensor(np.ascontiguousarray(look_down_depth)).float()
                     look_down_depth[look_down_depth > 5.0] = 5.0
                 else:
-                    # A. 仅在网络连接时推送边缘流，避免突发断网导致程序挂起
-                    if self.network_monitor.connected:
-                        try:
-                            self.s2_agent_step(image)
-                        except Exception as e:
-                            print(f"[Network Warning] S2 background stream failed: {e}")
-                            s2_step_num -= 1
-                    else:
-                        print("[Network Outage] Network disconnected. Skipping background S2 stream.")
-                        s2_step_num -= 1
+                    self.s2_agent_step(image)
 
                     time_0 = time.time()
                     down_observations, _, _, _ = self.env.step(action_code.LOOKDOWN)
@@ -568,66 +462,44 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
                     self.env.step(action_code.LOOKUP)
                     habitat_time += (time.time() - time_0)
 
-                # B. 在线网络恢复检测 (在线重连机制)
-                if self.network_monitor.connected and self.semantic_hold:
-                    print("[Network Recovered] Reconnected to S2 server. Resetting hold state.")
-                    self.semantic_hold = False
-                    self.semantic_hold_steps = 0
-                    pixel_goal = None  # 清空过时目标，强制触发全新 S2 全局规划
-                    action_seq = []
-                    local_actions = []
-
                 if len(action_seq) == 0 and pixel_goal is None:
-                    if self.network_monitor.connected:
-                        # 正常在线模式：向边缘服务器请求S2慢模型推理子目标
-                        look_down = (action == action_code.LOOKDOWN)
-                        s2_response = self.s2_agent_step(look_down_image, episode_instruction, s2_step_num, look_down)
+                    # S2 inference
+                    look_down = (action == action_code.LOOKDOWN)
+                    s2_response = self.s2_agent_step(look_down_image, episode_instruction, step_id, look_down)
 
-                        traj_latents = s2_response['traj_latents']
-                        if traj_latents is not None:
-                            time_0 = time.time()
-                            self.env.step(action_code.LOOKUP)
-                            self.env.step(action_code.LOOKUP)
-                            habitat_time += (time.time() - time_0)
+                    traj_latents = s2_response['traj_latents']
+                    if traj_latents is not None:
+                        time_0 = time.time()
+                        self.env.step(action_code.LOOKUP)
+                        self.env.step(action_code.LOOKUP)
+                        habitat_time += (time.time() - time_0)
 
-                            forward_action = 0
-                            draw_pixel_goal = True
-                            pixel_goal = s2_response['pixel_goal']
+                        forward_action = 0
+                        draw_pixel_goal = True
+                        pixel_goal = s2_response['pixel_goal']
 
-                            s1_response = self.s1_agent_step(look_down_image, look_down_depth, habitat_time, traj_latents)
-                            local_actions = s1_response['local_actions']
+                        s1_response = self.s1_agent_step(look_down_image, look_down_depth, habitat_time, traj_latents)
+                        local_actions = s1_response['local_actions']
 
-                            action = local_actions[0]
-                            if action == action_code.STOP:
-                                self.inference_logger.record_by_key(system_perf.STEP, \
-                                    time.time() - self.step_start_time - habitat_time)
-                                self.inference_logger.flush()
+                        action = local_actions[0]
+                        if action == action_code.STOP:
+                            self.inference_logger.record_by_key(system_perf.STEP, \
+                                time.time() - self.step_start_time - habitat_time)
+                            self.inference_logger.flush()
 
-                                pixel_goal = None
-                                action = action_code.LEFT
-                                observations, _, done, _ = self.env.step(action)
-                                step_id += 1
-                                s2_step_num += 1
+                            pixel_goal = None
+                            action = action_code.LEFT
+                            observations, _, done, _ = self.env.step(action)
+                            step_id += 1
 
-                                # self.s1_agent.reset()
-                                continue
-                            print('predicted goal', pixel_goal, flush=True)
-                        else:
-                            action_seq = s2_response['action_seq']
-                            print('actions', action_seq, flush=True)
+                            self.s1_agent.reset()
+                            continue
+                        print('predicted goal', pixel_goal, flush=True)
                     else:
-                        print("[Network Outage] S2 server unreachable. Triggering adaptive semantic hold.")
-                        # 触发网络中断
-                        self.semantic_hold = True
+                        action_seq = s2_response['action_seq']
+                        print('actions', action_seq, flush=True)
 
-                # D. 多模态动作仲裁器 (含自适应离散动作外推模块)
-                if self.semantic_hold:
-                    action = self.semantic_hold_infer(look_down_image, look_down_depth, habitat_time)
-                    print(f"[Semantic Hold] After semantic hold inference, selected action: {int(action)}.")
-                    # 维持断网自治纯净状态，清空残留缓存
-                    action_seq = []
-                    local_actions = []
-                elif len(action_seq) != 0:
+                if len(action_seq) != 0:
                     action = action_seq[0]
                     action_seq.pop(0)
                 elif pixel_goal is not None:
@@ -645,19 +517,15 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
                         self.inference_logger.record_by_key(system_perf.STEP, \
                             time.time() - self.step_start_time - habitat_time)
                         self.inference_logger.flush()
-                        # self.s1_agent.reset()
+                        self.s1_agent.reset()
 
                         pixel_goal = None
                         step_id += 1
-                        s2_step_num += 1
                         forward_action = 0
                         local_actions = []
                         continue
                 else:
                     action = 0
-                
-                # 新增：记录每一时刻实际驱动仿真的真实动作到历史，确保风险计算闭环
-                self.action_history.append(action)
 
                 time_0 = time.time()
                 info = self.env.get_metrics()
@@ -707,7 +575,6 @@ class RobustHabitatVLNEvaluator(DistributedEvaluator):
                 else:
                     observations, _, done, _ = self.env.step(action)
                     step_id += 1
-                    s2_step_num += 1
                     flag = False
 
             # ---------- 3. End of episode -----------

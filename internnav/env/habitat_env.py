@@ -40,7 +40,7 @@ class HabitatEnv(base.Env):
         self.episodes = self.generate_episodes()
         self.episodes = [ep for ep in self.episodes if "en" in ep.instruction.language]
         random.seed(0)
-        self.episodes = random.sample(self.episodes, 300)
+        self.episodes = random.sample(self.episodes, 50)
 
     def generate_episodes(self) -> List[Any]:
         """
