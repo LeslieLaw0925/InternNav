@@ -39,7 +39,7 @@ class InternutopiaEnv(base.Env):
         )
         self.episodes = generate_vln_episode(self.episode_loader, task_config)
         random.seed(0)
-        self.episodes = random.sample(self.episodes, 500)
+        self.episodes = random.sample(self.episodes, 300)
         if len(self.episodes) == 0:
             print("No episodes found for the given configuration.")
             sys.exit(0)

@@ -5,9 +5,12 @@ s2_infer:
 # On-device inference latency
 s1_infer:
   nextdit:
-    alpha: 0.093283 # N
-    beta: 0.000794 # N*B
-    c: 0.240866
+    # alpha: 0.093283 # N
+    # beta: 0.000794 # N*B
+    # c: 0.240866
+    alpha: 0.082530 # N
+    beta: 0.000875 # N*B
+    c: 0.228075
   navdp:
     alpha: 0.041678 # N
     beta: 0.000540 # N*B

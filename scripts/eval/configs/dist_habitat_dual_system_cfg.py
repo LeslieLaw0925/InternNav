@@ -7,9 +7,9 @@ eval_cfg = EvalCfg(
         ckpt_path='',
         model_settings={
             "mode": "dual_system",  # inference mode: dual_system or system2
-            'model_path': "checkpoints/InternVLA-N1-DualVLN",
-            # "model_path": "checkpoints/InternVLA-N1-w-NavDP", 
-            's1_type': 'nextdit_async', # 'nextdit_async' or 'navdp_async'
+            # 'model_path': "checkpoints/InternVLA-N1-DualVLN",
+            "model_path": "checkpoints/InternVLA-N1-w-NavDP", 
+            's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
             'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
             'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
             'adaptive_compression': True,

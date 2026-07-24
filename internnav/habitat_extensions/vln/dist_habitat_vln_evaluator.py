@@ -222,7 +222,8 @@ class DistributedHabitatVLNEvaluator(DistributedEvaluator):
     def s1_agent_step(self, rgb, depth, traj_latents=None):
         s1_start_time = time.time()
         elasped_time = s1_start_time - self.step_start_time
-        obs = {'rgb': rgb, 'depth': depth, 'traj_latents': traj_latents, 
+        obs = {'rgb': rgb, 'depth': depth, 
+               'traj_latents': np.array(traj_latents) if traj_latents is not None else None, 
                'latency_constraint': self.e2e_latency_threshold - elasped_time}
         request_data = StepRequest(observation=serialize_obs(obs)).model_dump(mode='json')
         response = requests.post(
@@ -232,7 +233,9 @@ class DistributedHabitatVLNEvaluator(DistributedEvaluator):
         )
         response.raise_for_status()
         response_data = response.json()
-        self.inference_logger.record_by_key(system_perf.S1, time.time() - s1_start_time)
+        s1_total_time = time.time() - s1_start_time
+        self.inference_logger.record_by_key(system_perf.S1, s1_total_time)
+        print(f"S1 transmission time: {s1_total_time - response_data['action']['s1_infer_time']:.4f}s.")
         return response_data['action']
     
     def compress_image(self, image):

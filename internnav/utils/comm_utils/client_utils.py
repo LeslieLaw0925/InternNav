@@ -15,11 +15,13 @@ from transformers import (
     PretrainedConfig
 )
 
+
 def serialize_obs(obs):
     serialized = pickle.dumps(obs)
     encoded = base64.b64encode(serialized).decode('utf-8')
     return encoded
-        
+
+
 image_preprocess = v2.Compose([
     v2.Resize((224, 224)),
     v2.ToDtype(torch.float32, scale=True), # 替代 ToTensor()，并归一化到 [0, 1]
