@@ -126,8 +126,9 @@ def draw_origin_image(image: np.array, pixel=None, suffix=''):
             2,
         )
         image = cv2.circle(image, (pixel[1], pixel[0]), 5, (0, 255, 0), -1)
+        return image
 
-    cv2.imwrite(f'logs/test_data/origin_image_{time.time()}{suffix}.png', image)  # 保存原始图像以供对比
+    # cv2.imwrite(f'logs/test_data/origin_image_{time.time()}{suffix}.png', image)  # 保存原始图像以供对比
 
 
 def draw_heatmap_on_image(image, importance_map, pixel=None, episode='0', suffix=''):

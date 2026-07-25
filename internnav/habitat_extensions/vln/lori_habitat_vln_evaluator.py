@@ -82,8 +82,8 @@ class system_perf(enumerate):
     COMP_RATIO = 'comp_ratio'
 
 
-@Evaluator.register('robust_habitat_vln')
-class RobustHabitatVLNEvaluator(DistributedEvaluator):
+@Evaluator.register('lori_habitat_vln')
+class LoriHabitatVLNEvaluator(DistributedEvaluator):
     def __init__(self, cfg: EvalCfg):
         args = argparse.Namespace(**cfg.eval_settings)
         self.save_video = args.save_video

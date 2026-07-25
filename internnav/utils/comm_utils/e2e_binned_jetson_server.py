@@ -12,6 +12,7 @@ import requests
 import numpy as np
 import torch
 import yaml
+from PIL import Image
 
 from internnav.agent.base import Agent
 from internnav.configs.agent import InitRequest, ResetRequest, StepRequest
@@ -22,6 +23,7 @@ from internnav.utils.comm_utils.visual_encoder import VisionEncoder, numpy_compr
     draw_origin_image, random_compression
 from internnav.utils.comm_utils.client_utils import *
 from internnav.utils.comm_utils.system_log import InferenceLogger
+from internnav.habitat_extensions.vln.e2e_binned import EndToEndBinnedSwapping
 
 
 class system_perf(enumerate):
@@ -35,7 +37,7 @@ class system_perf(enumerate):
     # EPISODE_ID = "episode_id"
 
 
-class IssacAgentServer:
+class E2EBinServer:
     """
     Server class for Agent service.
     """
@@ -64,6 +66,9 @@ class IssacAgentServer:
         vln_sensor_config = config.model_settings
         self.s1_type = vln_sensor_config.get('s1_type')
         self.vision_encoder = VisionEncoder(self.s1_type, device=self.device)
+
+        self.e2e_binned_swapping = EndToEndBinnedSwapping(
+            config.model_settings.get('s1_type'))
 
         self.image_compression_fachtor = 4
         self.e2e_latency_threshold = 1.5 # seconds
@@ -125,21 +130,13 @@ class IssacAgentServer:
     def _request_s2(self, obs: List[Dict[str, Any]], start_time: float):
         origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
 
-        if self.set_adaptive_compression:
-            # Estimate cloud latency
-            estimated_cloud_time = self.estimate_cloud_latency(len(serialize_obs(obs)))
-            self.if_compressed = (estimated_cloud_time is not None) and \
-                (estimated_cloud_time > self.cloud_latency_threshold)
-            log.info(f"Image compression needed: {self.if_compressed}")
-
-        response_data = self._transmit_obs(obs) # transmit the continuous observations to the server and get the response for system2
+        response_data, _ = self._transmit_obs(obs) # transmit the continuous observations to the server and get the response for system2
         cloud_data: dict = response_data['action'][0]
         traj_latents = cloud_data.get('traj_latents', None)
 
         if traj_latents is not None:
             traj_latents = torch.from_numpy(np.array(traj_latents)).to(self.device, self.dtype)
-
-            # origin_rgb = draw_origin_image(origin_rgb, cloud_data.get("pixel_goal"))
+            
             obs[0]['rgb'] = origin_rgb
             obs[0]['depth'] = depth
             self.s1_agent.record_goal_obs(obs[0], traj_latents)
@@ -155,26 +152,12 @@ class IssacAgentServer:
         return response_data
     
     def _transmit_obs(self, obs: List[Dict[str, Any]]):
-        origin_upload_size = None
-        if self.if_compressed:
-            image = obs[0]['rgb']
-            vit_latency, patch_importance = self.vision_encoder.get_patch_importance(image)
-            log.info(f"[TIME] ViT inference latency: {vit_latency:.4f}s")
-            time_constraint = self.cloud_latency_threshold - vit_latency
-            log.info(f"[CONSTRAINT] Remaining time constraint for image transmission: {time_constraint:.4f} seconds.")
-            p_star = solve_optimal_patch_ratio(image,
-                                               time_constraint,
-                                               self.ema_bandwidth,
-                                               compression_factor=self.image_compression_fachtor)
-            log.info(f"Calculated patch keep ratio (p_star): {p_star:.4f}")
-            if p_star < 1.0:
-                origin_upload_size = len(serialize_obs(obs))
-                obs[0]['rgb'] = numpy_compression_by_patch(image, 
-                                                           patch_importance, 
-                                                           keep_ratio=p_star, 
-                                                           compression_factor=self.image_compression_fachtor)
-                obs[0]['compressed'] = 1  # Indicate that the RGB has been compressed
-            self.if_compressed = False
+        origin_upload_size = len(serialize_obs(obs))
+
+        origin_image = Image.fromarray(obs[0]['rgb'])
+        compressed_image, s1_config = \
+            self.e2e_binned_swapping.execute_pipeline(origin_image, self.ema_bandwidth)
+        obs[0]['rgb'] = np.array(compressed_image)
 
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
@@ -207,7 +190,7 @@ class IssacAgentServer:
         if origin_upload_size is not None:
             self.inference_logger.record_by_key(system_perf.COMP_RATIO, \
                                                 (origin_upload_size - upload_data_size) / origin_upload_size)
-        return response_data
+        return response_data, s1_config
     
     def preprocess_obs(self, obs: List[Dict[str, Any]]):
         start_time = time()
@@ -231,18 +214,12 @@ class IssacAgentServer:
     def _request_normal_s1(self, obs: List[Dict[str, Any]], start_time: float):
         origin_rgb, depth = obs[0]['rgb'], obs[0].pop('depth', None)
 
-        if self.set_adaptive_compression:
-            # Estimate transmission latency
-            estimated_transmission_time = self.cal_transmission_time(len(serialize_obs(obs)))
-            self.if_compressed = (estimated_transmission_time is not None) and \
-                (estimated_transmission_time > self.cloud_latency_threshold)
-            log.info(f"Image compression needed: {self.if_compressed}")
-
         # Transmit the continuous observations to the edge server
-        self._transmit_obs(obs)
+        _, s1_config = self._transmit_obs(obs)
        
         obs[0]['rgb'] = origin_rgb # restore
         obs[0]['depth'] = depth # restore 
+        obs[0]['infer_config'] = s1_config # add the s1 config to the observation
         preprocess_time = time() - start_time
         obs[0]['latency_constraint'] = self.e2e_latency_threshold - preprocess_time
         response_data = self.s1_agent.step(obs[0])

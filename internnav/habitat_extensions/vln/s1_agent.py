@@ -88,8 +88,14 @@ class System1(Agent):
                                                   self.infer_step_range,
                                                   self.traj_num_range)
         else:
-            best_config = {'infer_step': self.infer_step_range[-1],
-                           'traj_num': self.traj_num_range[-1]}
+            s1_config = obs.get('infer_config', None)
+            if s1_config is not None:
+                best_config = {'infer_step': s1_config[0],
+                               'traj_num': s1_config[1]}
+            else:
+                best_config = {'infer_step': self.infer_step_range[-1],
+                               'traj_num': self.traj_num_range[-1]}
+                
         log.info(f"Chosen config for System1 inference: {best_config}")
 
         return self.s1_infer(obs, best_config, start_time)

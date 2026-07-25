@@ -128,7 +128,7 @@ class DistributedHabitatVLNEvaluator(DistributedEvaluator):
 
         self.s1_agent = System1(cfg.agent)
         self.s2_base_url = f"http://192.168.105.15:8023"
-        # self.s2_base_url = f"http://192.168.105.11:30091"
+        # self.s2_base_url = f"http://192.168.105.5:30814"
         self._init_agents(cfg.agent)
         self.ema_bandwidth = None
         with open('scripts/eval/configs/latency_profile.yaml', 'r', encoding='utf-8') as f:

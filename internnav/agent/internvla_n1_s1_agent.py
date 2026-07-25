@@ -96,8 +96,13 @@ class System1:
                                                   self.infer_step_range,
                                                   self.traj_num_range)
         else:
-            best_config = {'infer_step': self.infer_step_range[-1],
-                           'traj_num': self.traj_num_range[-1]}
+            s1_config = obs.get('infer_config', None)
+            if s1_config is not None:
+                best_config = {'infer_step': s1_config[0],
+                               'traj_num': s1_config[1]}
+            else:
+                best_config = {'infer_step': self.infer_step_range[-1],
+                            'traj_num': self.traj_num_range[-1]}
         log.info(f"Chosen config for System1 inference: {best_config}")
 
         return self.s1_infer(obs, best_config, start_time)
@@ -133,6 +138,7 @@ class System1:
         # # For visualization and debugging
         # self._draw_traj_img(rgb, rgbs, depths)
         # import pdb; pdb.set_trace()
+        
         with torch.no_grad():
             dp_actions = self.step_s1(self.traj_latents, rgbs, depths_dp=depths, 
                                         num_inference_steps=config['infer_step'], 
@@ -280,13 +286,13 @@ class System1:
             for traj_num in self.traj_num_range:
                 start_time = time.time()
                 with torch.no_grad():
-                    dp_actions, _ = self.step_s1(self.traj_latents, rgbs, depths_dp=depths, 
+                    dp_actions = self.step_s1(self.traj_latents, rgbs, depths_dp=depths, 
                                                 num_inference_steps=step_num, 
                                                 num_sample_trajs=traj_num)
                 infer_latency.append(time.time() - start_time)
                 log.info(f'[TIME] Actual s1 step time: {time.time() - start_time:.2f} s')
                 
-                action_list, _ = traj_to_actions(dp_actions, use_discrate_action=False)
+                action_list = traj_to_actions(dp_actions, use_discrate_action=False)
                 trajectories_list.append(action_list)
                 infer_configs.append((step_num, traj_num))
 
@@ -295,6 +301,9 @@ class System1:
 
 def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None, infer_latency=None, titles=None, suffix=''):
     import matplotlib.pyplot as plt
+
+    plt.rcParams['pdf.fonttype'] = 42
+    plt.rcParams['ps.fonttype'] = 42
 
     """
     image: 原始图像 (numpy array)
@@ -326,7 +335,7 @@ def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None
     # OpenCV 默认是 BGR，matplotlib 需要 RGB
     img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     axes[0].imshow(img_rgb)
-    axes[0].set_title("Subgoal Image", fontsize=12)
+    axes[0].set_title("Subgoal Image", fontsize=15)
     axes[0].axis('off') # 隐藏坐标轴
     
     pad_inch = 0.015
@@ -359,9 +368,9 @@ def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None
             ax.grid(True, alpha=0.3, linewidth=0.5)
             
             # 【关键】精简刻度以压缩空间
-            ax.set_xlabel('Y (left +)', fontsize=8, fontweight='bold')
+            ax.set_xlabel('Y (left +)', fontsize=10, fontweight='bold')
             if i == 0:
-                ax.set_ylabel('X (up +)', fontsize=8, fontweight='bold')
+                ax.set_ylabel('X (up +)', fontsize=12, fontweight='bold')
             else:
                 ax.set_yticklabels([]) # 隐藏中间轨迹图的纵坐标数字，节省空间
             ax.tick_params(labelsize=8)
@@ -369,7 +378,7 @@ def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None
             if titles:
                 ax.set_title(titles[i], fontsize=12)
             else:
-                ax.set_title(f"S = {infer_configs[i][0]}\nC = {infer_configs[i][1]}", fontsize=9)
+                ax.set_title(f"S = {infer_configs[i][0]}\nD = {infer_configs[i][1]}", fontsize=12)
 
     if infer_latency is not None:
         # 检查数据长度
@@ -418,7 +427,7 @@ def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None
         # 设置右侧坐标轴
         big_ax.yaxis.tick_right()
         big_ax.yaxis.set_label_position("right")
-        big_ax.set_ylabel('Latency (s)', color='#A03A13', fontsize=10, fontweight='bold')
+        big_ax.set_ylabel('Latency (s)', color='#A03A13', fontsize=12, fontweight='bold')
         big_ax.tick_params(axis='y', colors='#A03A13', labelsize=9)
         
         # 动态范围，防止折线紧贴边缘
@@ -432,8 +441,8 @@ def visualize_multiple_trajectories(image, trajectories_list, infer_configs=None
         labels.append('Latency')
 
     # 绘制全局图例，放在 Figure 正上方
-    fig.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, 1.10),
-               ncol=5, fontsize=14, frameon=True)
+    fig.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, 1.15),
+               ncol=5, fontsize=18, frameon=True)
     
     # 保存结果
     save_path = f'logs/comparison_{int(time.time())}{suffix}.pdf'

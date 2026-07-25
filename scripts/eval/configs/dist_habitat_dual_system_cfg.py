@@ -7,13 +7,13 @@ eval_cfg = EvalCfg(
         ckpt_path='',
         model_settings={
             "mode": "dual_system",  # inference mode: dual_system or system2
-            "model_path": "checkpoints/InternVLA-N1-w-NavDP",
-            # "model_path": "checkpoints/InternVLA-N1-DualVLN", 
-            's1_type': 'navdp_async', # 'nextdit_async' or 'navdp_async'
+            # "model_path": "checkpoints/InternVLA-N1-w-NavDP",
+            "model_path": "checkpoints/InternVLA-N1-DualVLN",
+            's1_type': 'nextdit_async', # 'nextdit_async' or 'navdp_async'
             'nextdit_pretrained': "checkpoints/nextdit_from_dual_vln.ckpt",
             'navdp_pretrained': "checkpoints/navdp_from_w_navdp.ckpt",
-            'adaptive_compression': False,
-            'adaptive_speedup': False,
+            'adaptive_compression': False, 
+            'adaptive_speedup': False, # e2e_binned baseline must set this to False
             "num_history": 8,
             "resize_w": 384,  # image resize width
             "resize_h": 384,  # image resize height
@@ -31,7 +31,7 @@ eval_cfg = EvalCfg(
             'config_path': 'scripts/eval/configs/vln_r2r.yaml',
         },
     ),
-    eval_type='robust_habitat_vln',
+    eval_type='dist_habitat_vln',
     eval_settings={
         # all current parse args
         "output_path": "./logs/habitat/test_dual_system",  # output directory for logs/results
