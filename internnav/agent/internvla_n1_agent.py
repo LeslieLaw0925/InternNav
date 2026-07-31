@@ -153,6 +153,7 @@ class InternVLAN1Agent(Agent):
                 #         continue
 
                 # Execute inference
+                s2_start_time = time.time()
                 success = True
                 try:
                     with self.s2_agent_lock:
@@ -188,6 +189,7 @@ class InternVLAN1Agent(Agent):
                         self.s2_output.output_latent = None
                         continue
 
+                s2_time = time.time() - s2_start_time
                 print("s2 infer finish!!")
                 # Update output state
                 with self.s2_output_lock:
@@ -201,6 +203,7 @@ class InternVLAN1Agent(Agent):
                     self.s2_output.rgb_memory = self.s2_input.rgb
                     self.s2_output.depth_memory = self.s2_input.depth
                     self.s2_output.is_infering = False
+                    self.s2_output.infer_time = s2_time
                 time.sleep(0.01)  # Sleep briefly after completing inference
 
         self.s2_thread = threading.Thread(target=s2_thread_func)
@@ -241,11 +244,12 @@ class InternVLAN1Agent(Agent):
         raise ValueError("Invalid mode: {}".format(mode))
 
     def step(self, obs):
+        step_start_time = time.time()
         mode = self.mode  # 'sync', 'partial_async'
 
         obs = obs[0]  # do not support batch_env currently?
         rgb = obs['rgb']
-        depth = obs['depth']
+        depth = obs.get('depth', None)
         instruction = obs['instruction']
         pose = np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
 
@@ -302,6 +306,7 @@ class InternVLAN1Agent(Agent):
             self.look_down = False
             # 2. If output is in latent form, execute latent S1
             if self.s2_output.output_latent is not None:
+                s1_start_time = time.time()
                 self.output_pixel = copy.deepcopy(self.s2_output.output_pixel)
                 print(self.output_pixel)
 
@@ -309,32 +314,35 @@ class InternVLAN1Agent(Agent):
                     processed_pixel_rgb = (
                         np.array(Image.fromarray(self.s2_output.rgb_memory).resize((224, 224))) / 255.0
                     )
-                    processed_pixel_depth = (
-                        np.array(Image.fromarray(self.s2_output.depth_memory[:, :, 0]).resize((224, 224))) * 10.0
-                    )
-                    processed_pixel_depth[processed_pixel_depth > self.sys1_depth_threshold] = self.sys1_depth_threshold
-
+                    if depth is not None:
+                        processed_pixel_depth = (
+                            np.array(Image.fromarray(self.s2_output.depth_memory[:, :, 0]).resize((224, 224))) * 10.0
+                        )
+                        processed_pixel_depth[processed_pixel_depth > self.sys1_depth_threshold] = self.sys1_depth_threshold
+                        processed_depth = (np.array(Image.fromarray(depth[:, :, 0]).resize((224, 224))) * 10.0
+                                            )  # should be 0-10m
+                        processed_depth[processed_depth > self.sys1_depth_threshold] = self.sys1_depth_threshold
+                        depths = (
+                            torch.stack([torch.from_numpy(processed_pixel_depth), torch.from_numpy(processed_depth)])
+                            .unsqueeze(0)
+                            .unsqueeze(-1)
+                            .to(self.device)
+                        )  # [1, 2, 224, 224, 1]
+                    else:
+                        depths = None
+                        
                     processed_rgb = np.array(Image.fromarray(rgb).resize((224, 224))) / 255.0
-                    processed_depth = (
-                        np.array(Image.fromarray(depth[:, :, 0]).resize((224, 224))) * 10.0
-                    )  # should be 0-10m
-                    processed_depth[processed_depth > self.sys1_depth_threshold] = self.sys1_depth_threshold
-
+                    
                     rgbs = (
                         torch.stack([torch.from_numpy(processed_pixel_rgb), torch.from_numpy(processed_rgb)])
                         .unsqueeze(0)
                         .to(self.device)
                     )  # [1, 2, 224, 224, 3]
-                    depths = (
-                        torch.stack([torch.from_numpy(processed_pixel_depth), torch.from_numpy(processed_depth)])
-                        .unsqueeze(0)
-                        .unsqueeze(-1)
-                        .to(self.device)
-                    )  # [1, 2, 224, 224, 1]
+                    
                     self.s1_output = self.policy.s1_step_latent(rgbs, depths, self.s2_output.output_latent)
                 else:
                     self.s1_output = self.policy.s1_step_latent(rgb, depth * 10000.0, self.s2_output.output_latent)
-
+                s1_time = time.time() - s1_start_time
             else:
                 assert False, f"S2 output should be either action or latent, but got neither!  {self.s2_output}"
 
@@ -400,7 +408,11 @@ class InternVLAN1Agent(Agent):
 
         self.episode_step += 1
         if 'action' in output:
-            return [{'action': output['action'], 'ideal_flag': True}]
+            return [{'action': output['action'], 
+                     'ideal_flag': True,
+                     's1_time': s1_time if 's1_time' in locals() else None,
+                     's2_time': self.s2_output.infer_time,
+                     'step_time': time.time() - step_start_time,}]
         elif 'velocity' in output:
             return [{'action': output['velocity'], 'ideal_flag': False}]
         else:

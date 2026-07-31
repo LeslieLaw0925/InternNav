@@ -157,6 +157,7 @@ class S2Output:
     output_latent: Optional[torch.Tensor] = None
     rgb_memory: Optional[np.ndarray] = None  # 用于记录pixel goal那一帧的rgb
     depth_memory: Optional[np.ndarray] = None  # 用于记录pixel goal那一帧的depth
+    infer_time: Optional[float] = None  # 用于记录s2推理时间
 
     def validate(self):
         """确保output_action、output_pixel和output_latent中只有一个为非None"""

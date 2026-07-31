@@ -14,7 +14,7 @@ class AgentCfg(BaseModel):
 class NewAgentCfg(BaseModel):
     cloud_server_host: str = 'localhost'
     cloud_server_port: int = 8087
-    local_server_port: int = 8022
+    local_server_port: int = 8023
     model_name: str
     ckpt_path: str = None
     model_settings: Dict[str, Any]
