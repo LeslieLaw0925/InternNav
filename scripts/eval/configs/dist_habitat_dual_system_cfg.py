@@ -31,7 +31,7 @@ eval_cfg = EvalCfg(
             'config_path': 'scripts/eval/configs/vln_rxr.yaml',
         },
     ),
-    eval_type='lori_habitat_vln',
+    eval_type='cloud_habitat_vln',
     eval_settings={
         # all current parse args
         "output_path": "./logs/habitat/test_dual_system",  # output directory for logs/results
