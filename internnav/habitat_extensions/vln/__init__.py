@@ -1,4 +1,5 @@
 from internnav.habitat_extensions.vln.habitat_vln_evaluator import HabitatVLNEvaluator
 from internnav.habitat_extensions.vln.dist_habitat_vln_evaluator import DistributedHabitatVLNEvaluator
+from internnav.habitat_extensions.vln.cloud_habitat_vln_evaluator import CloudHabitatVLNEvaluator
 from internnav.habitat_extensions.vln.lori_habitat_vln_evaluator import RobustHabitatVLNEvaluator
 from internnav.habitat_extensions.vln.e2e_binned_habitat_vln_evaluator import E2EBinnedHabitatVLNEvaluator

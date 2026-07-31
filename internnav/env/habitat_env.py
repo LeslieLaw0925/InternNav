@@ -39,7 +39,7 @@ class HabitatEnv(base.Env):
         # generate episodes
         self.episodes = self.generate_episodes()
         random.seed(0)
-        self.episodes = random.sample(self.episodes, 50)
+        self.episodes = random.sample(self.episodes, 10)
 
     def generate_episodes(self) -> List[Any]:
         """

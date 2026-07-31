@@ -179,7 +179,7 @@ class IssacAgentServer:
         serialized_obs = serialize_obs(obs)
         upload_data_size = len(serialized_obs)  # in bytes
         log.info(f"Upload observation size: {upload_data_size / 1024:.2f} KB")
-
+        
         transmission_start_time = time()
         request_data = StepRequest(observation=serialized_obs).model_dump(mode='json')
 

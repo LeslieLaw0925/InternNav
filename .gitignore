@@ -122,7 +122,6 @@ work_dirs/
 /asset
 # /assets
 
-
 # sphinx build dir
 docs/en/_build
 
@@ -149,6 +148,7 @@ logs/
 *.ckpt
 /results/
 checkpoints
+data
 internnav/model/basemodel/LongCLIP/
 .gradio/
 result/
